@@ -256,29 +256,43 @@ def load_data_by_length(
 # Kernel helpers
 # -----------------------------------------------------------------------------#
 
-def precompute_kernel(L: int, w: float) -> np.ndarray:
-    """Precompute a dense Gaussian kernel K[i,j] = exp(-|i-j|^2 / w^2).
+# --- choose kernel globally ---
+KERNEL_KIND = "laplace_rt"  # {"laplace", "gaussian", "laplace_rt"}
+KERNEL_ALPHA = 1.5
 
-    Args:
-      L: Kernel size (length of the row).
-      w: Kernel width (in index units). Must be > 0.
+def precompute_kernel(L: int, w: float, kind: str = KERNEL_KIND, alpha: float = KERNEL_ALPHA) -> np.ndarray:
+    """Precompute dense kernel K[i,j].
 
-    Returns:
-      (L,L) numpy array.
+    Gaussian : K = exp(-( |i-j|^2 ) / w^2)
+    Laplace  : K = exp(-( |i-j|   ) / b)  with b = w / sqrt(2) (~match σ of Gaussian)
     """
     if w <= 0:
         raise ValueError("Kernel width w must be positive.")
-    idx = np.arange(L)
+    idx = np.arange(L, dtype=np.float64)
     D = np.abs(np.subtract.outer(idx, idx))
-    return np.exp(-(D * D) / (w * w))
 
+    if kind == "laplace":
+        # scale so Laplace variance (2 b^2) ~ Gaussian σ^2 (= w^2)  →  b ≈ w/√2
+        b = max(float(w) / math.sqrt(2.0), 1e-12)
+        return np.exp(-D / b)
+    elif kind == "gaussian":
+        return np.exp(-(D * D) / (w * w))
+    elif kind == "laplace_rt":
+        if not (1.0 < alpha < 2.0):
+            raise ValueError("laplace_rt: alpha must be in (1, 2).")
+        # Choose b so K(d=w) ≈ 0.5, keeping 'w' comparable across kinds
+        b = max(float(w) / (math.log(2.0) ** (1.0 / alpha)), 1e-12)
+        return np.exp(-np.power(D / b, alpha))
 
-def _get_kernel(n: int, w: float) -> np.ndarray:
-    """Return cached kernel for (n, w), computing if necessary."""
-    key = (n, float(w))
+    raise ValueError(f"Unknown kernel kind: {kind!r}")
+
+_kernel_cache = {}
+def _get_kernel(n: int, w: float, kind: str = KERNEL_KIND) -> np.ndarray:
+    """Return cached kernel for (n, w, kind), computing if necessary."""
+    key = (n, float(w), kind)
     K = _kernel_cache.get(key)
     if K is None:
-        K = precompute_kernel(n, w)
+        K = precompute_kernel(n, w, kind)
         _kernel_cache[key] = K
     return K
 
@@ -505,7 +519,7 @@ def _scan_row(params: Tuple[int, np.ndarray, List[Tuple[int, int]], np.ndarray, 
             (0,0), -np.inf, 0.0, 0, None, None, 0
         )
 
-    W_trimmed = _get_kernel(n_trimmed, w)
+    W_trimmed = _get_kernel(n_trimmed, w, KERNEL_KIND)
     sra, ssr_array, pred_array = calculate_nwkr_sra(row_trimmed, W_trimmed)
     sra = sra if sra > 1e-12 else 1e-12
 
@@ -1011,7 +1025,7 @@ def refine_all_windows_exact_for_length(
     out_fixed    : List[Tuple[int,int]] = []
 
     for i in range(N):
-        W_trimmed = _get_kernel(n_trimmed, ws[i])      # ws[i] is native-scale
+        W_trimmed = _get_kernel(n_trimmed, ws[i], KERNEL_KIND)      # ws[i] is native-scale
         range_cap = range_caps[i]                      # native-scale
         row_trimmed = spec_arrays[i, buffer:L-buffer]
 
