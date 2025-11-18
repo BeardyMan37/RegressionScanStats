@@ -31,7 +31,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
-from numba import njit, prange
+from numba import njit
 from scipy.signal import find_peaks, peak_widths
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -257,7 +257,7 @@ def load_data_by_length(
 # -----------------------------------------------------------------------------#
 
 # --- choose kernel globally ---
-KERNEL_KIND = "laplace"  # {"laplace", "gaussian", "laplace_rt"}
+KERNEL_KIND = "gaussian"  # {"laplace", "gaussian", "laplace_rt"}
 KERNEL_ALPHA = 1.5
 
 def precompute_kernel(L: int, w: float, kind: str = KERNEL_KIND, alpha: float = KERNEL_ALPHA) -> np.ndarray:
@@ -296,6 +296,146 @@ def _get_kernel(n: int, w: float, kind: str = KERNEL_KIND) -> np.ndarray:
         _kernel_cache[key] = K
     return K
 
+class GaussianWindowState:
+    """
+    Incremental NWKR state over a contiguous support idxs for Gaussian kernel.
+
+    Holds:
+      idxs : indices in the current support (1D int array)
+      num  : per-index numerator sums Σ_j W[i,j] x[j]
+      den  : per-index denominator sums Σ_j W[i,j]
+      sse  : total Σ_i (x[i] - pred[i])^2 over idxs
+    """
+    __slots__ = ("idxs", "num", "den", "sse")
+
+    def __init__(self, idxs, num, den, sse):
+        self.idxs = idxs
+        self.num = num
+        self.den = den
+        self.sse = float(sse)
+
+
+def _gaussian_state_init(x: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> GaussianWindowState:
+    """
+    Initialize Gaussian NWKR state on 'idxs' from scratch.
+
+    This is mathematically identical to _ssr_region_dense with idxs=inside and
+    a<=i0<=b (i.e. only the "inside" part of the original code).
+    """
+    m = idxs.shape[0]
+    num = np.zeros(m, dtype=np.float64)
+    den = np.zeros(m, dtype=np.float64)
+    for k in range(m):
+        i = idxs[k]
+        for j in range(m):
+            jj = idxs[j]
+            w = W[i, jj]
+            num[k] += w * x[jj]
+            den[k] += w
+    preds = np.divide(num, den, out=np.zeros_like(num), where=den > 1e-12)
+    sse = float(((x[idxs] - preds) ** 2).sum())
+    return GaussianWindowState(idxs.copy(), num, den, sse)
+
+
+def _gaussian_state_add_point(
+    x: np.ndarray,
+    state: GaussianWindowState,
+    new_idx: int,
+    W: np.ndarray,
+) -> GaussianWindowState:
+    """
+    Extend a GaussianWindowState by appending one new index at the right.
+
+    Result is algebraically identical to re-running _gaussian_state_init on the
+    new idx set (state.idxs plus new_idx), but O(m) instead of O(m^2).
+    """
+    old_idxs = state.idxs
+    m_prev = old_idxs.shape[0]
+
+    idxs_new = np.empty(m_prev + 1, dtype=np.int64)
+    idxs_new[:m_prev] = old_idxs
+    idxs_new[m_prev] = new_idx
+
+    x_prev = x[old_idxs]
+    x_new = x[new_idx]
+
+    # Update existing points' num/den with contribution from new_idx
+    w_existing = W[old_idxs, new_idx]          # shape (m_prev,)
+    num_new = np.empty(m_prev + 1, dtype=np.float64)
+    den_new = np.empty(m_prev + 1, dtype=np.float64)
+    num_new[:m_prev] = state.num + w_existing * x_new
+    den_new[:m_prev] = state.den + w_existing
+
+    # New point's own num/den across all current support
+    w_new_all = W[new_idx, idxs_new]           # shape (m_prev+1,)
+    num_new[m_prev] = (w_new_all[:m_prev] * x_prev).sum() + w_new_all[m_prev] * x_new
+    den_new[m_prev] = w_new_all.sum()
+
+    # Recompute residuals over the updated support
+    preds_prev = np.divide(num_new[:m_prev], den_new[:m_prev],
+                           out=np.zeros_like(num_new[:m_prev]),
+                           where=den_new[:m_prev] > 1e-12)
+    pred_new = num_new[m_prev] / den_new[m_prev] if den_new[m_prev] > 1e-12 else 0.0
+    residuals_prev = x_prev - preds_prev
+    res_new = x_new - pred_new
+    sse_new = float((residuals_prev ** 2).sum() + res_new * res_new)
+
+    return GaussianWindowState(idxs_new, num_new, den_new, sse_new)
+
+def _gaussian_state_remove_point(
+    x: np.ndarray,
+    state: GaussianWindowState,
+    rem_idx: int,
+    W: np.ndarray,
+) -> GaussianWindowState:
+    """
+    Remove rem_idx from a GaussianWindowState support set.
+
+    New num/den for each remaining i:
+
+        num'_i = num_i - W[i, rem_idx] * x[rem_idx]
+        den'_i = den_i - W[i, rem_idx]
+
+    Then recompute SSE over the remaining support. This is exactly what
+    _ssr_region_dense would produce for the NWKR part, but updated in O(m).
+    """
+    idxs_old = state.idxs
+    m_prev = idxs_old.shape[0]
+
+    pos = -1
+    for t in range(m_prev):
+        if idxs_old[t] == rem_idx:
+            pos = t
+            break
+    if pos == -1:
+        return state
+
+    m_new = m_prev - 1
+    idxs_new = np.empty(m_new, dtype=np.int64)
+    num_new = np.empty(m_new, dtype=np.float64)
+    den_new = np.empty(m_new, dtype=np.float64)
+
+    cur = 0
+    for t in range(m_prev):
+        if t == pos:
+            continue
+        i = idxs_old[t]
+        idxs_new[cur] = i
+        w_ir = W[i, rem_idx]
+        num_new[cur] = state.num[t] - w_ir * x[rem_idx]
+        den_new[cur] = state.den[t] - w_ir
+        cur += 1
+
+    sse_new = 0.0
+    for u in range(m_new):
+        i = idxs_new[u]
+        d = den_new[u]
+        pred = num_new[u] / d if d > 1e-12 else 0.0
+        diff = x[i] - pred
+        sse_new += diff * diff
+
+    return GaussianWindowState(idxs_new, num_new, den_new, sse_new)
+
 
 # --- Warmup utilities ---------------------------------------------------------
 
@@ -326,9 +466,9 @@ def _jit_touch_predictors(n: int, w_bins: int, kind: str) -> None:
         # predictions are not used. Laplace path normally avoids W.
         W = _get_kernel(n, float(w_bins), "gaussian")
     # compiles predict_on_idxs and ssr_region (via a tiny call)
-    _ = predict_on_idxs(x, idxs, W)
+    _ = predict_on_idxs(x, idxs, W, kind="gaussian", sigma=None)
     ssr_arr = (x - x.mean()).astype(np.float64) ** 2
-    _ = ssr_region(x, idxs, W, ssr_arr, 2, min(n - 1, 6), range_cap=3)
+    _ = ssr_region_dispatch(x, idxs, W, ssr_arr, 2, min(n - 1, 6), range_cap=3, kind="gaussian", sigma=None)
 
 def _build_tiny_scan_param(L: int, kind: str) -> tuple:
     # tiny row + minimal metadata to JIT the _scan_row path that branches on KERNEL_KIND
@@ -350,7 +490,6 @@ def warmup_numba_and_caches(
 
     Call this once after load_data_by_length(...) and before launching the pool.
     """
-    # 1) Prefill kernel cache for representative lengths/widths observed in data
     lengths = sorted(groups.keys())
     for L in lengths:
         specs, _, _, _, _, freqs, _ = groups[L]
@@ -360,17 +499,12 @@ def warmup_numba_and_caches(
             for k in kinds:
                 _ = _get_kernel(max(8, min(L, small_n)), float(max(3, w_bins)), k)
 
-    # 2) JIT-hit both scoring backends on small vectors
-    # Laplace path
     _jit_touch_laplace_path(n=small_n, sigma=16.0)
-    # Gaussian path
     _jit_touch_gaussian_path(n=small_n, w_bins=16)
 
-    # 3) JIT-hit predictors / regional SSR (used inside scanning)
     for k in kinds:
         _jit_touch_predictors(n=small_n, w_bins=16, kind=k)
 
-    # 4) JIT-hit the _scan_row branching logic for each kind by temporarily toggling the global
     global KERNEL_KIND
     old_kind = KERNEL_KIND
     for k in kinds:
@@ -379,11 +513,9 @@ def warmup_numba_and_caches(
         _ = _scan_row(params)  # compiles the code path taken for this kernel kind
     KERNEL_KIND = old_kind
 
-    # 5) Touch Laplace accumulator twice to build thread team and stabilize fastmath reductions
     _jit_touch_laplace_path(n=small_n, sigma=16.0)
 
 def _worker_warmup(kind: str, n: int = 64) -> None:
-    # keep top-level for pickling
     if kind == "laplace":
         _jit_touch_laplace_path(n=n, sigma=8.0)
     else:
@@ -417,12 +549,12 @@ def _laplace_accum_1d(w: np.ndarray, sigma: float) -> np.ndarray:
 
     for i in range(1, n):
         L = gamma * (L + w[i - 1])
-        R = gamma * (R - gamma * w[i])
+        R = (R - gamma * w[i]) / gamma 
         out[i] = inv_n * (L + R + w[i])
 
     return out
 
-@njit(cache=True, fastmath=True, parallel=True)
+@njit(cache=True, fastmath=True)
 def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray) -> Tuple[float, np.ndarray, np.ndarray]:
     """Compute NWKR predictions and sum of squared residuals (SSR).
 
@@ -438,7 +570,7 @@ def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray) -> Tuple[float, np.ndar
     n = array.shape[0]
     numer = np.empty(n, dtype=array.dtype)
     denom = np.empty(n, dtype=array.dtype)
-    for i in prange(n):
+    for i in range(n):
         s_num = 0.0
         s_den = 0.0
         for j in range(n):
@@ -450,7 +582,7 @@ def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray) -> Tuple[float, np.ndar
     ssr = 0.0
     ssr_array = np.empty(n, dtype=array.dtype)
     pred_array = np.empty(n, dtype=array.dtype)
-    for i in prange(n):
+    for i in range(n):
         pred = numer[i] / denom[i] if denom[i] > 0.0 else 0.0
         pred_array[i] = pred
         diff = array[i] - pred
@@ -458,7 +590,7 @@ def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray) -> Tuple[float, np.ndar
         ssr += ssr_array[i]
     return ssr, ssr_array, pred_array
 
-@njit(cache=True, fastmath=True, parallel=True)
+@njit(cache=True, fastmath=True)
 def calculate_laplace_sra_fast(array: np.ndarray, sigma: float):
     """
     Return (ssr, ssr_array, pred_array) for Laplace kernel K=exp(-|i-j|/sigma)
@@ -471,7 +603,7 @@ def calculate_laplace_sra_fast(array: np.ndarray, sigma: float):
     pred = np.empty(n, dtype=array.dtype)
     ssr_arr = np.empty(n, dtype=array.dtype)
     ssr = 0.0
-    for i in prange(n):
+    for i in range(n):
         d = den[i]
         p = num[i] / d if d > 1e-12 else 0.0
         pred[i] = p
@@ -480,25 +612,74 @@ def calculate_laplace_sra_fast(array: np.ndarray, sigma: float):
         ssr += ssr_arr[i]
     return ssr, ssr_arr, pred
 
-
-@njit(cache=True, fastmath=True, parallel=True)
-def predict_on_idxs(array: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> np.ndarray:
-    """Predict NWKR values at a subset of indices using only the subset as support.
-
-    NOTE: This uses *subset-local* support (weights from idxs only). If you
-    intend to predict w.r.t. the full row, implement a global-support variant.
-
-    Args:
-      array: 1D row.
-      idxs: 1D integer indices to predict at.
-      W: full (n,n) kernel.
-
-    Returns:
-      1D predictions for positions in `idxs`.
+@njit(cache=True, fastmath=True)
+def predict_on_idxs_laplace(array: np.ndarray, idxs: np.ndarray, sigma: float) -> np.ndarray:
     """
+    Laplace NWKR predictions restricted to 'idxs' as both query and support.
+    Uses O(m) recurrences over the *sorted* subset with gap-dependent decays.
+
+    f[i_t] = ( w[i_t] + sum_{s<t} gamma^{i_t - i_s} w[i_s] + sum_{s>t} gamma^{i_s - i_t} w[i_s] )
+             / ( 1      + sum_{s<t} gamma^{i_t - i_s}           + sum_{s>t} gamma^{i_s - i_t} ),
+    where gamma = exp(-1/sigma) and gaps use actual index distances.
+    """
+    array = array.astype(np.float64)
     m = idxs.shape[0]
     out = np.empty(m, dtype=array.dtype)
-    for ii in prange(m):
+    if m == 0:
+        return out
+    if m == 1:
+        out[0] = array[idxs[0]]
+        return out
+
+    order = np.argsort(idxs)
+    rev = np.empty_like(order)
+    for k in range(m):
+        rev[order[k]] = k
+    sidx = idxs[order]
+
+    gamma = math.exp(-1.0 / sigma) if sigma > 0.0 else 0.0
+
+    decay_lt = np.empty(m, dtype=np.float64)
+    decay_rt = np.empty(m, dtype=np.float64)
+    decay_lt[0] = 0.0  # unused
+    decay_rt[m-1] = 0.0  # unused
+    inv_sigma = 1.0 / sigma if sigma > 0.0 else 0.0
+    for t in range(1, m):
+        decay_lt[t] = math.exp(-(sidx[t] - sidx[t-1]) * inv_sigma)
+    for t in range(0, m-1):
+        decay_rt[t] = math.exp(-(sidx[t+1] - sidx[t]) * inv_sigma)
+
+    left_num = np.zeros(m, dtype=np.float64)
+    left_den = np.zeros(m, dtype=np.float64)
+    for t in range(1, m):
+        d = decay_lt[t]
+        left_num[t] = d * (left_num[t-1] + array[sidx[t-1]])
+        left_den[t] = d * (left_den[t-1] + 1.0)
+
+
+    right_num = np.zeros(m, dtype=np.float64)
+    right_den = np.zeros(m, dtype=np.float64)
+    for t in range(m-2, -1, -1):
+        d = decay_rt[t]
+        right_num[t] = d * (right_num[t+1] + array[sidx[t+1]])
+        right_den[t] = d * (right_den[t+1] + 1.0)
+
+    preds_sorted = np.empty(m, dtype=np.float64)
+    for t in range(m):
+        num = left_num[t] + right_num[t] + array[sidx[t]]
+        den = left_den[t] + right_den[t] + 1.0
+        preds_sorted[t] = num / den if den > 1e-12 else 0.0
+
+    for k in range(m):
+        out[k] = preds_sorted[rev[k]]
+    return out
+
+@njit(cache=True, fastmath=True)
+def predict_on_idxs_denseW(array: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> np.ndarray:
+    """Original O(m^2) subset-local prediction using dense W (Gaussian or fallback)."""
+    m = idxs.shape[0]
+    out = np.empty(m, dtype=array.dtype)
+    for ii in range(m):
         i0 = idxs[ii]
         num = 0.0
         den = 0.0
@@ -510,9 +691,24 @@ def predict_on_idxs(array: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> np.nd
         out[ii] = num / den if den > 1e-12 else 0.0
     return out
 
+def predict_on_idxs(array: np.ndarray,
+                             idxs: np.ndarray,
+                             W: np.ndarray,
+                             kind: str,
+                             sigma: float | None = None) -> np.ndarray:
+    """
+    If kind=='laplace' and sigma is provided, use the O(m) subset recurrences.
+    Otherwise fall back to dense-W implementation (O(m^2)).
+    """
+    if kind == "laplace" and sigma is not None and sigma > 0.0:
+        return predict_on_idxs_laplace(array.astype(np.float64), idxs.astype(np.int64), float(sigma))
+    else:
+        return predict_on_idxs_denseW(array, idxs.astype(np.int64), W)
 
-@njit(cache=True, fastmath=True, parallel=True)
-def ssr_region(
+
+# --- dense-W fallback (original behavior) ------------------------------------
+@njit(cache=True, fastmath=True)
+def _ssr_region_dense(
     array: np.ndarray,
     idxs: np.ndarray,
     W: np.ndarray,
@@ -521,20 +717,6 @@ def ssr_region(
     b: int,
     range_cap: int,
 ) -> float:
-    """Compute SSR over a region and its near/far complements.
-
-    Args:
-      array: 1D row values.
-      idxs: 1D indices to evaluate (either inside or outside set).
-      W: (n,n) kernel.
-      ssr_array: residuals^2 from full NWKR (for 'far' reuse).
-      a: inclusive start of current hypothesis window in index space.
-      b: inclusive end of current hypothesis window.
-      range_cap: neighborhood half-width used to decide near/far.
-
-    Returns:
-      Scalar SSR contribution for this idx set.
-    """
     m = idxs.shape[0]
     sri = 0.0
     sro_far = 0.0
@@ -542,7 +724,7 @@ def ssr_region(
     low_cut = a - 2 * range_cap
     high_cut = b + 2 * range_cap
 
-    for ii in prange(m):
+    for ii in range(m):
         i0 = idxs[ii]
         if a <= i0 <= b:
             num = 0.0
@@ -552,8 +734,7 @@ def ssr_region(
                 w_ij = W[i0, j0]
                 num += w_ij * array[j0]
                 den += w_ij
-            pred = num / den if den > 0.0 else 0.0
-            diff = array[i0] - pred
+            diff = array[i0] - (num / den if den > 1e-12 else 0.0)
             sri += diff * diff
         elif i0 < low_cut or i0 > high_cut:
             sro_far += ssr_array[i0]
@@ -565,10 +746,72 @@ def ssr_region(
                 w_ij = W[i0, j0]
                 num += w_ij * array[j0]
                 den += w_ij
-            pred = num / den if den > 0.0 else 0.0
-            diff = array[i0] - pred
+            diff = array[i0] - (num / den if den > 1e-12 else 0.0)
             sro_near += diff * diff
     return sri + sro_near + sro_far
+
+# --- Laplace fast-path (uses subset recurrences) ------------------------------
+@njit(cache=True, fastmath=True)
+def _ssr_region_laplace(
+    array: np.ndarray,
+    idxs: np.ndarray,
+    ssr_array: np.ndarray,
+    a: int,
+    b: int,
+    range_cap: int,
+    sigma: float,
+) -> float:
+    """
+    Same semantics as ssr_region, but for Laplace kernel without dense W.
+    Predictions at 'idxs' are computed in O(m); 'far' reuses ssr_array.
+    """
+    m = idxs.shape[0]
+    if m == 0:
+        return 0.0
+
+    preds = predict_on_idxs_laplace(array, idxs, sigma)
+
+    sri = 0.0
+    sro_far = 0.0
+    sro_near = 0.0
+    low_cut = a - 2 * range_cap
+    high_cut = b + 2 * range_cap
+
+    for ii in range(m):
+        i0 = idxs[ii]
+        if a <= i0 <= b:
+            diff = array[i0] - preds[ii]
+            sri += diff * diff
+        elif i0 < low_cut or i0 > high_cut:
+            sro_far += ssr_array[i0]
+        else:
+            diff = array[i0] - preds[ii]
+            sro_near += diff * diff
+
+    return sri + sro_near + sro_far
+
+# --- thin dispatcher to call from score_variance_nwkr --------------------
+def ssr_region_dispatch(
+    array: np.ndarray,
+    idxs: np.ndarray,
+    W: np.ndarray,
+    ssr_array: np.ndarray,
+    a: int,
+    b: int,
+    range_cap: int,
+    kind: str,
+    sigma: float | None = None,
+) -> float:
+    """
+    If kind=='laplace' and sigma>0, use the O(m) subset Laplace path.
+    Else use the original dense-W path.
+    """
+    if kind == "laplace" and sigma is not None and sigma > 0.0:
+        return _ssr_region_laplace(array.astype(np.float64), idxs.astype(np.int64),
+                                   ssr_array.astype(np.float64), a, b, range_cap, float(sigma))
+    else:
+        return _ssr_region_dense(array, idxs.astype(np.int64), W, ssr_array, a, b, range_cap)
+
 
 
 def score_variance_nwkr(
@@ -586,8 +829,9 @@ def score_variance_nwkr(
     Returns:
       Negative total SSR (inside + outside components). Higher is better.
     """
-    sri = ssr_region(array, inside, W, ssr_array, a, b, range_cap)
-    sro = ssr_region(array, outside, W, ssr_array, a, b, range_cap)
+    sigma = float(max(range_cap // 3, 1))
+    sri = ssr_region_dispatch(array, inside, W, ssr_array, a, b, range_cap, KERNEL_KIND, sigma)
+    sro = ssr_region_dispatch(array, outside, W, ssr_array, a, b, range_cap, KERNEL_KIND, sigma)
     return -(sri + sro)
 
 
@@ -619,7 +863,7 @@ def _scan_row(params: Tuple[int, np.ndarray, List[Tuple[int, int]], np.ndarray, 
     """
     row_idx, row, ignore, freqs, buffer, sr_factor = params
 
-    def _overlap_stats(a_orig: int, b_orig: int, ignore_ranges: List[Tuple[int, int]]) -> Tuple[float, int]:
+    def _overlap_stats(a_orig: int, b_orig: int, ignore_ranges: List[Tuple[int, int]]) -> float:
         if b_orig < a_orig:
             return 0.0, 0
         win_len = (b_orig - a_orig + 1)
@@ -650,7 +894,7 @@ def _scan_row(params: Tuple[int, np.ndarray, List[Tuple[int, int]], np.ndarray, 
     freq_step = abs(freqs[1] - freqs[0])
     L = len(freqs)
     R = ref_freq / (freq_step if freq_step > 0 else 1.0)
-    w = int(round(max(3, min(R / sr_factor, L / 16))))
+    w = int(round(max(3, min(R, L / 16))))
     range_cap = 3 * w
 
     row_trimmed = row[buffer: len(row) - buffer]
@@ -662,112 +906,208 @@ def _scan_row(params: Tuple[int, np.ndarray, List[Tuple[int, int]], np.ndarray, 
             (0,0), -np.inf, 0.0, 0, None, None, 0
         )
 
-    W_trimmed = _get_kernel(n_trimmed, w, KERNEL_KIND)
+    if KERNEL_KIND == "gaussian":
+        W_trimmed = _get_kernel(n_trimmed, w, "gaussian")
+    else:
+        W_trimmed = np.empty((1,1), dtype=np.float64)  # dummy, never used in Laplace path
     if KERNEL_KIND == "gaussian":        
         sra, ssr_array, pred_array = calculate_nwkr_sra(row_trimmed, W_trimmed)
     elif KERNEL_KIND == "laplace":
-        sigma = float(max(w, 1))  # or tune mapping if you prefer
+        sigma = float(max(w, 1))
         sra, ssr_array, pred_array = calculate_laplace_sra_fast(row_trimmed, sigma)
     sra = sra if sra > 1e-12 else 1e-12
 
-    # # Build ignore mask for masked mode (trimmed coords)
-    # ignore_trimmed: List[Tuple[int, int]] = []
-    # for (start, end) in ignore:
-    #     s0 = max(start - buffer, 0)
-    #     e0 = min(end - buffer, n_trimmed - 1)
-    #     if s0 < e0:
-    #         ignore_trimmed.append((s0, e0))
+    # Build ignore mask for masked mode (trimmed coords)
+    ignore_trimmed: List[Tuple[int, int]] = []
+    for (start, end) in ignore:
+        s0 = max(start - buffer, 0)
+        e0 = min(end - buffer, n_trimmed - 1)
+        if s0 <= e0:
+            ignore_trimmed.append((s0, e0))
 
-    # mask = np.ones(n_trimmed, dtype=np.bool_)
-    # for s0, e0 in ignore_trimmed:
-    #     mask[s0:e0 + 1] = False
+    mask = np.ones(n_trimmed, dtype=np.bool_)
+    for s0, e0 in ignore_trimmed:
+        mask[s0:e0 + 1] = False
 
-    # all_trimmed = np.arange(n_trimmed)
-    # valid_masked = np.nonzero(mask)[0]
+    all_trimmed = np.arange(n_trimmed)
+    valid_masked = np.nonzero(mask)[0]
 
-    # # ---------- variable-length search helper ----------
-    # def _varlen_search(valid: np.ndarray) -> Tuple[Tuple[int,int], float, np.ndarray | None, np.ndarray | None]:
-    #     best_sc = -np.inf
-    #     best_win = (0, 0)
-    #     best_idx_full = None
-    #     best_vals = None
+    # ---------- variable-length search helper ----------
+    def _varlen_search(valid: np.ndarray) -> Tuple[Tuple[int,int], float, np.ndarray | None, np.ndarray | None]:
+        best_sc = -np.inf
+        best_win = (0, 0)
+        best_idx_full = None
+        best_vals = None
 
-    #     n_valid = valid.shape[0]
-    #     for pos_i in range(n_valid):
-    #         i = valid[pos_i]
-    #         # enforce contiguous start
-    #         if pos_i < n_valid - 1 and (valid[pos_i + 1] - i) > 1:
-    #             continue
-    #         stop = min(pos_i + 1 + range_cap, n_valid)
-    #         sub = valid[pos_i + 1: stop]
-    #         for pos_j in range(sub.shape[0]):
-    #             j = sub[pos_j]
-    #             # keep contiguity for j; prune on first gap
-    #             if pos_j > 0 and (sub[pos_j] - sub[pos_j - 1]) > 1:
-    #                 break
-    #             lo = pos_i
-    #             hi = pos_i + 1 + pos_j
-    #             inside = valid[lo:hi + 1]
-    #             outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
-    #             sc = score_variance_nwkr(row_trimmed, inside, outside, i, j, range_cap, W_trimmed, ssr_array)
-    #             sc = sc / sra + 1.0
-    #             if sc > best_sc:
-    #                 best_sc = sc
-    #                 best_win = (i, j)
-    #                 best_idx_full = inside + buffer
-    #                 best_vals = predict_on_idxs(row_trimmed, inside, W_trimmed)
-    #     oi, oj = best_win
-    #     return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+        n_valid = valid.shape[0]
+        for pos_i in range(n_valid):
+            i = valid[pos_i]
+            if pos_i < n_valid - 1 and (valid[pos_i + 1] - i) > 1:
+                continue
 
-    # # ---------- fixed-length linear sweep (span ~ ref_freq, unmasked) ----------
-    # # step_med = _safe_freq_step(freqs)
-    # # window_bins = int(np.floor(ref_freq / (step_med if step_med > 0 else 1.0)))
-    # # window_bins = max(1, min(window_bins, n_trimmed))
-    # window_bins = min(int(round(R)), n_trimmed)
+            stop = min(pos_i + 1 + range_cap, n_valid)
+            sub = valid[pos_i + 1: stop]
 
-    # def _fixedlen_sweep() -> Tuple[Tuple[int,int], float, np.ndarray | None, np.ndarray | None]:
-    #     best_sc = -np.inf
-    #     best_win = (0, 0)
-    #     best_idx_full = None
-    #     best_vals = None
+            gstate_in: GaussianWindowState | None = None
 
-    #     max_start = max(0, n_trimmed - window_bins)
-    #     for i in range(max_start + 1):
-    #         inside = np.arange(i, i + window_bins, dtype=np.int64)
-    #         outside = np.setdiff1d(all_trimmed, inside, assume_unique=False)
-    #         j = i + window_bins - 1
-    #         sc = score_variance_nwkr(row_trimmed, inside, outside, i, j, range_cap, W_trimmed, ssr_array)
-    #         sc = sc / sra + 1.0
-    #         if sc > best_sc:
-    #             best_sc = sc
-    #             best_win = (i, j)
-    #             best_idx_full = inside + buffer
-    #             best_vals = predict_on_idxs(row_trimmed, inside, W_trimmed)
-    #     oi, oj = best_win
-    #     return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+            for pos_j in range(sub.shape[0]):
+                j = sub[pos_j]
+                if pos_j > 0 and (sub[pos_j] - sub[pos_j - 1]) > 1:
+                    break
 
-    # # A) masked var-len
-    # best_win_masked, best_sc_masked, sri_idx_masked, sri_vals_masked = _varlen_search(valid_masked)
+                lo = pos_i
+                hi = pos_i + 1 + pos_j
+                inside = valid[lo:hi + 1]
+                outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
 
-    # # B) unmasked var-len + overlap
-    # best_win_unmasked, best_sc_unmasked, sri_idx_unmasked, sri_vals_unmasked = _varlen_search(all_trimmed)
-    # overlap_pct_unmasked = _overlap_stats(best_win_unmasked[0], best_win_unmasked[1], ignore)
+                if KERNEL_KIND == "gaussian":
+                    new_idx = inside[-1]
+                    if gstate_in is None:
+                        gstate_in = _gaussian_state_init(row_trimmed, inside, W_trimmed)
+                    else:
+                        if new_idx != gstate_in.idxs[-1]:
+                            gstate_in = _gaussian_state_add_point(row_trimmed, gstate_in, new_idx, W_trimmed)
+                    sri_inc = gstate_in.sse
 
-    # # C) fixed-len linear (unmasked) + overlap
-    # best_win_fixed, best_sc_fixed, sri_idx_fixed, sri_vals_fixed = _fixedlen_sweep()
-    # overlap_pct_fixed = _overlap_stats(best_win_fixed[0], best_win_fixed[1], ignore)
+                    sigma = float(max(range_cap // 3, 1))
+                    sro = ssr_region_dispatch(
+                        row_trimmed,
+                        outside,
+                        W_trimmed,
+                        ssr_array,
+                        int(i),
+                        int(j),
+                        range_cap,
+                        KERNEL_KIND,
+                        sigma,
+                    )
 
-    # return (
-    #     # masked var-len
-    #     row_idx, best_win_masked, best_sc_masked, pred_array, sri_idx_masked, sri_vals_masked, w * sr_factor, range_cap * sr_factor,
-    #     # unmasked var-len
-    #     best_win_unmasked, best_sc_unmasked, overlap_pct_unmasked, sri_idx_unmasked, sri_vals_unmasked,
-    #     # fixed-len linear
-    #     best_win_fixed, best_sc_fixed, overlap_pct_fixed, sri_idx_fixed, sri_vals_fixed, window_bins * sr_factor
-    # )
-    return ( 0, None, 0, None, 0, None, 0, 0,
-            None, None, 0, 0, None,
-            None, None, 0, 0, None, 0)
+                    sc = -(sri_inc + sro)
+
+                else:
+                    sc = score_variance_nwkr(
+                        row_trimmed,
+                        inside,
+                        outside,
+                        int(i),
+                        int(j),
+                        range_cap,
+                        W_trimmed,
+                        ssr_array,
+                    )
+
+                sc = sc / sra + 1.0
+                if sc > best_sc:
+                    best_sc = sc
+                    best_win = (i, j)
+                    best_idx_full = inside + buffer
+                    best_vals = predict_on_idxs(
+                        row_trimmed,
+                        inside,
+                        W_trimmed,
+                        KERNEL_KIND,
+                        float(max(w, 1)),
+                    )
+
+        oi, oj = best_win
+        return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+
+
+    # ---------- fixed-length linear sweep (span ~ ref_freq, unmasked) ----------
+    window_bins = min(int(round(R)), n_trimmed)
+
+    def _fixedlen_sweep() -> Tuple[Tuple[int,int], float, np.ndarray | None, np.ndarray | None]:
+        best_sc = -np.inf
+        best_win = (0, 0)
+        best_idx_full = None
+        best_vals = None
+
+        max_start = max(0, n_trimmed - window_bins)
+
+        gstate_in: GaussianWindowState | None = None
+
+        for i in range(max_start + 1):
+            j = i + window_bins - 1
+
+            inside = np.arange(i, i + window_bins, dtype=np.int64)
+            outside = np.setdiff1d(all_trimmed, inside, assume_unique=False)
+
+            if KERNEL_KIND == "gaussian":
+                if gstate_in is None:
+                    gstate_in = _gaussian_state_init(row_trimmed, inside, W_trimmed)
+                else:
+                    rem_idx = i - 1
+                    add_idx = j
+                    gstate_in = _gaussian_state_remove_point(row_trimmed, gstate_in, rem_idx, W_trimmed)
+                    gstate_in = _gaussian_state_add_point(row_trimmed, gstate_in, add_idx, W_trimmed)
+
+                sri_inc = gstate_in.sse
+
+                sigma = float(max(range_cap // 3, 1))
+                sro = ssr_region_dispatch(
+                    row_trimmed,
+                    outside,
+                    W_trimmed,
+                    ssr_array,
+                    int(i),
+                    int(j),
+                    range_cap,
+                    KERNEL_KIND,
+                    sigma,
+                )
+
+                sc = -(sri_inc + sro)
+            else:
+                sc = score_variance_nwkr(
+                    row_trimmed,
+                    inside,
+                    outside,
+                    int(i),
+                    int(j),
+                    range_cap,
+                    W_trimmed,
+                    ssr_array,
+                )
+
+            sc = sc / sra + 1.0
+            if sc > best_sc:
+                best_sc = sc
+                best_win = (i, j)
+                best_idx_full = inside + buffer
+                best_vals = predict_on_idxs(
+                    row_trimmed,
+                    inside,
+                    W_trimmed,
+                    KERNEL_KIND,
+                    float(max(w, 1)),
+                )
+
+        oi, oj = best_win
+        return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+
+
+    # A) masked var-len
+    best_win_masked, best_sc_masked, sri_idx_masked, sri_vals_masked = _varlen_search(valid_masked)
+
+    # B) unmasked var-len + overlap
+    best_win_unmasked, best_sc_unmasked, sri_idx_unmasked, sri_vals_unmasked = _varlen_search(all_trimmed)
+    overlap_pct_unmasked = _overlap_stats(best_win_unmasked[0], best_win_unmasked[1], ignore)
+
+    # C) fixed-len linear (unmasked) + overlap
+    best_win_fixed, best_sc_fixed, sri_idx_fixed, sri_vals_fixed = _fixedlen_sweep()
+    overlap_pct_fixed = _overlap_stats(best_win_fixed[0], best_win_fixed[1], ignore)
+
+    return (
+        # masked var-len
+        row_idx, best_win_masked, best_sc_masked, pred_array, sri_idx_masked, sri_vals_masked, w * sr_factor, range_cap * sr_factor,
+        # unmasked var-len
+        best_win_unmasked, best_sc_unmasked, overlap_pct_unmasked, sri_idx_unmasked, sri_vals_unmasked,
+        # fixed-len linear
+        best_win_fixed, best_sc_fixed, overlap_pct_fixed, sri_idx_fixed, sri_vals_fixed, window_bins * sr_factor
+    )
+    # return ( 0, None, 0, None, 0, None, 0, 0,
+    #         None, None, 0, 0, None,
+    #         None, None, 0, 0, None, 0)
 
 
 
@@ -850,9 +1190,20 @@ def polynomial_scan_ranges_parallel(
 # Visualization & post-processing
 # -----------------------------------------------------------------------------#
 
+def _clamp_pair(a: int, b: int, n: int) -> tuple[int, int]:
+    """Clamp an inclusive index pair to [0, n-1] and sort."""
+    a = int(a); b = int(b)
+    if a > b:
+        a, b = b, a
+    a = max(0, min(a, n - 1))
+    b = max(0, min(b, n - 1))
+    return a, b
+
+
 def plot_top_k(
     df: pd.DataFrame,
     actual_spec_arrays: np.ndarray,
+    freqs: np.ndarray,
     # windows (native coords, inclusive)
     windows_masked: List[Tuple[int, int]],
     windows_unmasked: List[Tuple[int, int]],
@@ -977,27 +1328,41 @@ def plot_top_k(
 
         for ax, i0 in zip(axes, batch):
             spec = actual_spec_arrays[i0]
+            freq = np.asarray(freqs[i0], dtype=float)
             a_m, b_m = windows_masked[i0]
             a_u, b_u = windows_unmasked[i0]
             a_f, b_f = windows_fixed[i0]
 
             # Atmospheric interference shading
             for (c, d) in atm_interfs[i0]:
-                ax.axvspan(c, d, color="C9", alpha=0.15, label=None)
+                ci, di = _clamp_pair(c, d, len(freq))
+                if ci <= di:
+                    ax.axvspan(float(freq[ci]), float(freq[di]), color="C9", alpha=0.15, label=None)
+
 
             # Raw spectrum
-            x = np.arange(len(spec))
-            ax.plot(x, spec, color="C0", label="Actual")
+            # x = np.arange(len(spec))
+            ax.plot(freq, spec, color="C0", label="Actual")
 
             # Buffer shading
-            if buf_orig > 0:
-                ax.axvspan(0, buf_orig - 1, color="gray", alpha=0.15, label=None)
-                ax.axvspan(len(spec) - buf_orig, len(spec) - 1, color="gray", alpha=0.15, label=None)
+            if buf_orig > 0 and len(freq) > 0:
+                li0, li1 = _clamp_pair(0, buf_orig - 1, len(freq))
+                if li0 <= li1:
+                    ax.axvspan(float(freq[li0]), float(freq[li1]), color="gray", alpha=0.15, label=None)
+                ri0_start = max(len(freq) - buf_orig, 0)
+                ri0, ri1 = _clamp_pair(ri0_start, len(freq) - 1, len(freq))
+                if ri0 <= ri1:
+                    ax.axvspan(float(freq[ri0]), float(freq[ri1]), color="gray", alpha=0.15, label=None)
+
 
             # Window overlays (distinct alphas)
-            ax.axvspan(a_m, b_m, color="C1", alpha=0.35, label=None)
-            ax.axvspan(a_u, b_u, color="C2", alpha=0.25, label=None)
-            ax.axvspan(a_f, b_f, color="C3", alpha=0.25, label=None)
+            am0, am1 = _clamp_pair(a_m, b_m, len(freq))
+            au0, au1 = _clamp_pair(a_u, b_u, len(freq))
+            af0, af1 = _clamp_pair(a_f, b_f, len(freq))
+            if am0 <= am1: ax.axvspan(float(freq[am0]), float(freq[am1]), color="C1", alpha=0.35, label=None)
+            if au0 <= au1: ax.axvspan(float(freq[au0]), float(freq[au1]), color="C2", alpha=0.25, label=None)
+            if af0 <= af1: ax.axvspan(float(freq[af0]), float(freq[af1]), color="C3", alpha=0.25, label=None)
+
 
             # SRA predicted curve (shared)
             if sra_preds is not None and sra_preds[i0] is not None and len(sra_preds[i0]) > 0:
@@ -1005,7 +1370,7 @@ def plot_top_k(
                 sra_up = np.repeat(sra_preds[i0], sr_factor)
                 end = len(spec) - buf_orig
                 pred_full[buf_orig:end] = sra_up[: max(0, end - buf_orig)]
-                ax.plot(np.arange(len(spec)), pred_full, ".", ms=2, label="SRA pred")
+                ax.plot(freq, pred_full, ".", ms=2, label="SRA pred")
 
             # SRI overlays per window (optional)
             def _plot_sri(idx_list, val_list, label: str):
@@ -1020,7 +1385,7 @@ def plot_top_k(
                 for p, v in zip(idx_orig_start, val_sr):
                     p_end = min(p + sr_factor, len(spec))
                     sri_full[p:p_end] = v
-                ax.plot(np.arange(len(spec)), sri_full, ".", ms=2, label=label)
+                ax.plot(freq, sri_full, ".", ms=2, label=label)
 
             _plot_sri(sri_idxs_masked,   sri_vals_masked,   "SRI masked")
             _plot_sri(sri_idxs_unmasked, sri_vals_unmasked, "SRI unmasked")
@@ -1042,7 +1407,7 @@ def plot_top_k(
             parts.append(f"W={ws[i0]}")
             ax.set_title("  ".join(parts))
 
-            ax.set_xlabel("Channel")
+            ax.set_xlabel("Frequency (GHz)")
             ax.set_ylabel("Amplitude")
 
         legend_elements = [
@@ -1058,22 +1423,18 @@ def plot_top_k(
             Patch(facecolor="gray", alpha=0.15, label="Buffer"),
         ]
 
-        # Let tight_layout do its thing for subplots first
         plt.tight_layout()
 
-        # Add a compact legend just below the top edge (inside the figure box)
         fig.legend(
             handles=legend_elements,
             loc="upper center",
             ncol=5,
             frameon=True,
-            bbox_to_anchor=(0.5, 0.985),  # pull this down if you still see crowding
+            bbox_to_anchor=(0.5, 0.985),
         )
 
-        # Now reclaim top space but keep a little headroom for legend + title
-        fig.subplots_adjust(top=0.92)  # try 0.92–0.95 depending on your fonts
+        fig.subplots_adjust(top=0.92)
 
-        # Keep the title but don’t push everything down
         fig.suptitle(
             f"Top {min(k, len(order_desc))} ranked by {rank_by} — batch {fig_i+1}/{n_figs}",
             y=0.995
@@ -1179,12 +1540,20 @@ def refine_all_windows_exact_for_length(
     out_fixed    : List[Tuple[int,int]] = []
 
     for i in range(N):
-        W_trimmed = _get_kernel(n_trimmed, ws[i], KERNEL_KIND)      # ws[i] is native-scale
         range_cap = range_caps[i]                      # native-scale
         row_trimmed = spec_arrays[i, buffer:L-buffer]
 
-        sra, ssr_array, _ = calculate_nwkr_sra(row_trimmed, W_trimmed)
-        sra = sra if sra > 1e-12 else 1e-12
+        if KERNEL_KIND == "gaussian":
+            W_trimmed = _get_kernel(n_trimmed, ws[i], "gaussian")
+            sra, ssr_array, _ = calculate_nwkr_sra(row_trimmed, W_trimmed)
+        else:
+            sigma = float(max(ws[i], 1))
+            W_trimmed = np.empty((1,1), dtype=np.float64)
+            sra, ssr_array, _ = calculate_laplace_sra_fast(row_trimmed, sigma)
+
+        
+        # sra, ssr_array, _ = calculate_nwkr_sra(row_trimmed, W_trimmed)
+        # sra = sra if sra > 1e-12 else 1e-12
 
         # Build native valid mask for masked refinement
         mask = np.ones(n_trimmed, dtype=np.bool_)
@@ -1287,16 +1656,37 @@ def main() -> None:
     logging.info("Found lengths: %s", sorted(groups.keys()))
 
     # Typical SR factors per channel length (fallback=1 if missing).
+    length_SR_FACTOR_map: Dict[int, int] = {
+        8 : 1,
+        16 : 1,
+        32 : 1,
+        64 : 1,
+        69 : 1,
+        74 : 1,
+        120: 1,
+        128 : 1,
+        137 : 1,
+        147 : 1,
+        160 : 1,
+        171 : 1,
+        240 : 1,
+        256 : 1,
+        342 : 1,
+        480 : 2,
+        512 : 2,
+        640 : 2,
+        960 : 4,
+        1024 : 4,
+        1920 : 8,
+        2048 : 8,
+        3840 : 16,
+        4096 : 16,
+    }
     # length_SR_FACTOR_map: Dict[int, int] = {
     #     64: 1, 120: 1, 128: 1, 240: 1, 256: 1,
-    #     480: 2, 512: 2, 960: 4, 1024: 4,
-    #     1920: 8, 2048: 8, 3840: 16,
+    #     480: 1, 512: 1, 960: 1, 1024: 1,
+    #     1920: 1, 2048: 1, 3840: 1,
     # }
-    length_SR_FACTOR_map: Dict[int, int] = {
-        64: 1, 120: 1, 128: 1, 240: 1, 256: 1,
-        480: 1, 512: 1, 960: 1, 1024: 1,
-        1920: 1, 2048: 1, 3840: 1,
-    }
 
     warmup_numba_and_caches(groups, kinds=("laplace","gaussian"), sample_per_length=1, small_n=128)
 
@@ -1307,12 +1697,12 @@ def main() -> None:
         logging.info("Before Preprocessing: Length=%d: %d rows, %d channels", length, n_rows, row_len)
 
         SR_FACTOR = length_SR_FACTOR_map.get(length, 1)
-        # atm_interfs_sr = superresolve_ranges(atm_interfs, factor=SR_FACTOR)
-        # actual_specs_sr = superresolve(actual_specs, factor=SR_FACTOR)
-        # freqs_sr = superresolve(freqs, factor=SR_FACTOR)
-        atm_interfs_sr = atm_interfs
-        actual_specs_sr = actual_specs
-        freqs_sr = freqs
+        atm_interfs_sr = superresolve_ranges(atm_interfs, factor=SR_FACTOR)
+        actual_specs_sr = superresolve(actual_specs, factor=SR_FACTOR)
+        freqs_sr = superresolve(freqs, factor=SR_FACTOR)
+        # atm_interfs_sr = atm_interfs
+        # actual_specs_sr = actual_specs
+        # freqs_sr = freqs
         
 
         n_rows, row_len = actual_specs_sr.shape
@@ -1369,36 +1759,37 @@ def main() -> None:
             windows_exact_unmasked = windows_sr_unmasked
             windows_exact_fixed    = windows_sr_fixed
 
-        # plot_top_k(
-        #     df=df,
-        #     actual_spec_arrays=actual_specs,
-        #     windows_masked=windows_exact_masked,
-        #     windows_unmasked=windows_exact_unmasked,
-        #     windows_fixed=windows_exact_fixed,
-        #     scores_masked=scores_masked,
-        #     scores_unmasked=scores_unmasked,
-        #     scores_fixed=scores_fixed,
-        #     overlap_unmasked_pct=overlap_unm_pct,
-        #     overlap_fixed_pct=overlap_fix_pct,
-        #     atm_interfs=atm_interfs,
-        #     meta=meta,
-        #     ws=ws,
-        #     k=min(args.top_k, n_rows),
-        #     per_fig=args.per_fig,
-        #     buffer=BUFFER,
-        #     out_dir=out_dir,
-        #     data_dir=data_dir,
-        #     sra_preds=sra_preds,
-        #     sri_idxs_masked=sri_idxs,
-        #     sri_vals_masked=sri_vals,
-        #     sri_idxs_unmasked=sri_idxs_unm,
-        #     sri_vals_unmasked=sri_vals_unm,
-        #     sri_idxs_fixed=sri_idxs_fix,
-        #     sri_vals_fixed=sri_vals_fix,
-        #     sr_factor=SR_FACTOR,
-        #     fixed_bins_nat=fixed_bins_nat,
-        #     rank_by="masked",
-        # )
+        plot_top_k(
+            df=df,
+            actual_spec_arrays=actual_specs,
+            freqs=freqs,
+            windows_masked=windows_exact_masked,
+            windows_unmasked=windows_exact_unmasked,
+            windows_fixed=windows_exact_fixed,
+            scores_masked=scores_masked,
+            scores_unmasked=scores_unmasked,
+            scores_fixed=scores_fixed,
+            overlap_unmasked_pct=overlap_unm_pct,
+            overlap_fixed_pct=overlap_fix_pct,
+            atm_interfs=atm_interfs,
+            meta=meta,
+            ws=ws,
+            k=min(args.top_k, n_rows),
+            per_fig=args.per_fig,
+            buffer=BUFFER,
+            out_dir=out_dir,
+            data_dir=data_dir,
+            sra_preds=sra_preds,
+            sri_idxs_masked=sri_idxs,
+            sri_vals_masked=sri_vals,
+            sri_idxs_unmasked=sri_idxs_unm,
+            sri_vals_unmasked=sri_vals_unm,
+            sri_idxs_fixed=sri_idxs_fix,
+            sri_vals_fixed=sri_vals_fix,
+            sr_factor=SR_FACTOR,
+            fixed_bins_nat=fixed_bins_nat,
+            rank_by="masked",
+        )
 
 
 if __name__ == "__main__":
