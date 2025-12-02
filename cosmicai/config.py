@@ -12,7 +12,7 @@ _KERNEL_KIND: KernelKind = KernelKind.GAUSSIAN
 _KERNEL_ALPHA: float = 1.5  # used by any RT variants if you add back
 _SUPER_RESOLVE_BASE: int = 450
 
-def set_kernel(kind: str):
+def set_kernel_kind(kind: str):
     global _KERNEL_KIND
     k = kind.lower()
     if k not in ("gaussian", "laplace"):

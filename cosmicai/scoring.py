@@ -1,8 +1,8 @@
 from __future__ import annotations
 import numpy as np
 from numba import njit
-from .laplace_fast import calculate_laplace_sra_fast
-from .predictors import predict_on_idxs_denseW, predict_on_idxs_laplace
+from .config import KernelKind
+from .predictors import predict_on_idxs_laplace
 
 @njit(cache=True, fastmath=True)
 def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray):
@@ -75,19 +75,25 @@ def _ssr_region_laplace(array: np.ndarray, idxs: np.ndarray, ssr_array: np.ndarr
             diff = array[i0] - preds[ii]; sro_near += diff * diff
     return sri + sro_near + sro_far
 
-def ssr_region_dispatch(array, idxs, W, ssr_array, a, b, range_cap, kind: str, sigma: float | None = None) -> float:
-    if kind == "laplace":
+def ssr_region_dispatch(array: np.ndarray, idxs: np.ndarray, W: np.ndarray, ssr_array: np.ndarray, a: int, b: int, range_cap: int, kind: str, sigma: float | None = None) -> float:
+    if kind == KernelKind.LAPLACE:
         if sigma is None or sigma <= 0.0:
             raise ValueError("Laplace predictor requires positive sigma.")
         return _ssr_region_laplace(array.astype(np.float64), idxs.astype(np.int64),
                                    ssr_array.astype(np.float64), a, b, range_cap, float(sigma))
-    elif kind == "gaussian":
+    elif kind == KernelKind.GAUSSIAN:
         if W is None:
             raise ValueError("Dense predictor requires W (got None).")
         return _ssr_region_dense(array, idxs.astype(np.int64), W, ssr_array, a, b, range_cap)
+    else:
+        raise ValueError(f"Unknown kernel kind: {kind!r}")
  
-def score_variance_nwkr(array, inside, outside, a, b, range_cap, W, ssr_array, kind: str) -> float:
-    sigma = float(max(range_cap // 3, 1))
+def score_variance_nwkr(array: np.ndarray, inside: np.ndarray, outside: np.ndarray, a: int, b: int, range_cap: int, W: np.ndarray, ssr_array: np.ndarray, kind: str, sigma: float | None = None) -> float:
+    if kind == KernelKind.LAPLACE:
+        if sigma is None or sigma <= 0:
+            raise ValueError(...)
+    elif kind == KernelKind.GAUSSIAN:
+        sigma = 0.0
     sri = ssr_region_dispatch(array, inside,  W, ssr_array, a, b, range_cap, kind, sigma)
     sro = ssr_region_dispatch(array, outside, W, ssr_array, a, b, range_cap, kind, sigma)
     return -(sri + sro)

@@ -1,8 +1,6 @@
 from __future__ import annotations
-from typing import Any, Callable, Dict, Iterable, List, Tuple
-import os
+from typing import Any, List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from .scan import scan_row
 from .warmup import worker_warmup
 
 def polynomial_scan_ranges_parallel(spec_arrays, score_fn, atm_interfs, freq_arrays, buffer, sr_factor, max_workers=None):

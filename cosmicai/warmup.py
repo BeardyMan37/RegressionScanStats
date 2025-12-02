@@ -1,14 +1,13 @@
 from __future__ import annotations
-import math, numpy as np
+import numpy as np
 from typing import Dict, Tuple, List
-from .config import ref_freq, get_kernel_kind, set_kernel
+from .config import ref_freq, get_kernel_kind, set_kernel_kind
 from .kernels import _get_kernel as _get_kernel
 from .scoring import calculate_nwkr_sra
 from .laplace_fast import calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
 from .scoring import ssr_region_dispatch
 from .scan import scan_row
-from numba import njit
 
 def _estimate_w_from_freqs(freqs_row: np.ndarray, sr_factor: int = 1) -> int:
     step = float(np.median(np.diff(freqs_row))) if len(freqs_row) > 1 else ref_freq
@@ -68,10 +67,10 @@ def warmup_numba_and_caches(
 
     old = get_kernel_kind().value
     for k in kinds:
-        set_kernel(k)                     
+        set_kernel_kind(k)                     
         params = _build_tiny_scan_param(L=max(32, small_n), kind=k)
         _ = scan_row(params)
-    set_kernel(old)
+    set_kernel_kind(old)
 
     _jit_touch_laplace_path(n=small_n, sigma=16.0)
 

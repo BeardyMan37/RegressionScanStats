@@ -1,7 +1,7 @@
 from __future__ import annotations
 import argparse, logging, time, os
 from typing import Dict
-from cosmicai.config import set_kernel
+from cosmicai.config import set_kernel_kind, get_kernel_kind
 from cosmicai.io_preprocess import load_data_by_length
 from cosmicai.warmup import warmup_numba_and_caches
 from cosmicai.scan import scan_row
@@ -26,7 +26,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = _build_arg_parser().parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
-    set_kernel(args.kernel_kind)
+    set_kernel_kind(args.kernel_kind)
 
     t0 = time.perf_counter()
     df, groups = load_data_by_length(args.data_path, args.interference_path)
@@ -53,7 +53,7 @@ def main() -> None:
                      length, actual_specs_sr.shape[0], actual_specs_sr.shape[1], SR_FACTOR)
 
         t2 = time.perf_counter()
-        (windows_sr_masked, scores_masked, sra_preds, sri_idxs, sri_vals, ws, range_caps,
+        (windows_sr_masked, scores_masked, sra_preds, sri_idxs_m, sri_vals_m, ws, range_caps,
          windows_sr_unmasked, scores_unmasked, overlap_unm_pct, sri_idxs_unm, sri_vals_unm,
          windows_sr_fixed, scores_fixed, overlap_fix_pct, sri_idxs_fix, sri_vals_fix, fixed_bins_nat
         ) = polynomial_scan_ranges_parallel(
@@ -103,8 +103,8 @@ def main() -> None:
             out_dir=out_dir,
             data_dir=data_dir,
             sra_preds=sra_preds,
-            sri_idxs_masked=sri_idxs,
-            sri_vals_masked=sri_vals,
+            sri_idxs_masked=sri_idxs_m,
+            sri_vals_masked=sri_vals_m,
             sri_idxs_unmasked=sri_idxs_unm,
             sri_vals_unmasked=sri_vals_unm,
             sri_idxs_fixed=sri_idxs_fix,

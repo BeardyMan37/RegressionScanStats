@@ -106,7 +106,7 @@ def plot_top_k(
 
     out_csv = os.path.join(
         data_dir,
-        f"bandpass_qa0_no_partitions_labelled_filt_scan_stat_length_{actual_spec_arrays.shape[1]}.csv",
+        f"output_length_{actual_spec_arrays.shape[1]}.csv",
     )
     sub_df.to_csv(out_csv, index=False)
     logging.info("Wrote summary CSV (all windows): %s", out_csv)

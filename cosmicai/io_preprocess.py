@@ -1,8 +1,7 @@
 from __future__ import annotations
-import os, ast, math, numpy as np, pandas as pd
-from typing import Any, Dict, Iterable, List, Tuple
+import os, ast, numpy as np, pandas as pd
+from typing import Dict, List, Tuple
 from scipy.signal import find_peaks, peak_widths
-from .config import ref_freq
 
 def match_and_correct(freq_array, trans_freqs, trans_vals) -> np.ndarray:
     idxs = np.searchsorted(trans_freqs, freq_array)
@@ -112,7 +111,7 @@ def load_data_by_length(data_path: str, interference_path: str):
 
         df["atmospheric_interference"] = interference
 
-        actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude"].tolist()]
+        actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude_corr_tsys"].tolist()]
         freqs = [np.asarray(x, dtype=float) for x in df["frequency_array"].tolist()]
 
     else:
@@ -128,8 +127,8 @@ def load_data_by_length(data_path: str, interference_path: str):
     atm_intrf = list(df["atmospheric_interference"])
     uid = df["uid"].to_numpy()
     ref = df["ref_antenna_name"].to_numpy()
-    ant = df["antenna_name"].to_numpy()
-    pol = df["pol_id"].to_numpy()
+    ant = df["antenna"].to_numpy()
+    pol = df["polarization"].to_numpy()
 
     length_groups: Dict[int, List[int]] = {}
     for i, s in enumerate(actual_specs):

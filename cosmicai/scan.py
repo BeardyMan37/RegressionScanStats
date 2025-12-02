@@ -1,7 +1,7 @@
 from __future__ import annotations
-import math, numpy as np
-from typing import Any, Dict, List, Tuple
-from .config import ref_freq, get_kernel_kind
+import numpy as np
+from typing import List, Tuple
+from .config import ref_freq, get_kernel_kind, KernelKind
 from .kernels import _get_kernel as _get_kernel
 from .gaussian_state import (
     GaussianWindowState,
@@ -11,10 +11,10 @@ from .gaussian_state import (
 )
 from .scoring import (
     calculate_nwkr_sra,
-    calculate_laplace_sra_fast,
     ssr_region_dispatch,
     score_variance_nwkr,
 )
+from .laplace_fast import calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
 
 def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, int, int]):
@@ -57,15 +57,26 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
             (0,0), -np.inf, 0.0, 0, None, None,
             (0,0), -np.inf, 0.0, 0, None, None, 0
         )
+    
+    all_full = np.arange(n)
+    if kernel_kind == KernelKind.GAUSSIAN:
+        W_full = _get_kernel(n, w, KernelKind.GAUSSIAN)
+        sra_full, ssr_full, _ = calculate_nwkr_sra(row, W_full)
+        lap_sigma_full = None
+    else:
+        W_full = None
+        lap_sigma_full = sigma = float(max(w, 1))
+        sra_full, ssr_full, _ = calculate_laplace_sra_fast(row, lap_sigma_full)
+    sra_full = max(sra_full, 1e-12)
 
-    if kernel_kind == "gaussian":
-        W_trimmed = _get_kernel(n_trimmed, w, "gaussian")
+    if kernel_kind == KernelKind.GAUSSIAN:
+        W_trimmed = _get_kernel(n_trimmed, w, KernelKind.GAUSSIAN)
     else:
         W_trimmed = None
-    if kernel_kind == "gaussian":
+    if kernel_kind == KernelKind.GAUSSIAN:
         sra, ssr_array, pred_array = calculate_nwkr_sra(row_trimmed, W_trimmed)
         sigma = None
-    elif kernel_kind == "laplace":
+    elif kernel_kind == KernelKind.LAPLACE:
         sigma = float(max(w, 1))
         sra, ssr_array, pred_array = calculate_laplace_sra_fast(row_trimmed, sigma)
     sra = sra if sra > 1e-12 else 1e-12
@@ -110,8 +121,9 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                 hi = pos_i + 1 + pos_j
                 inside = valid[lo:hi + 1]
                 outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
+                sigma = float(max(w, 1))
 
-                if kernel_kind == "gaussian":
+                if kernel_kind == KernelKind.GAUSSIAN:
                     new_idx = inside[-1]
                     if gstate_in is None:
                         gstate_in = gaussian_state_init(row_trimmed, inside, W_trimmed)
@@ -120,7 +132,6 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                             gstate_in = gaussian_state_add_point(row_trimmed, gstate_in, new_idx, W_trimmed)
                     sri_inc = gstate_in.sse
 
-                    sigma = float(max(range_cap // 3, 1))
                     sro = ssr_region_dispatch(
                         row_trimmed,
                         outside,
@@ -145,7 +156,8 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                         range_cap,
                         W_trimmed,
                         ssr_array,
-                        kernel_kind
+                        kernel_kind,
+                        sigma
                     )
 
                 sc = sc / sra + 1.0
@@ -153,7 +165,7 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                     best_sc = sc
                     best_win = (i, j)
                     best_idx_full = inside + buffer
-                    sigma = float(max(range_cap // 3, 1))
+                    sigma = float(max(w, 1))
                     best_vals = predict_on_idxs(
                         row_trimmed,
                         inside,
@@ -173,73 +185,51 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
         best_idx_full = None
         best_vals = None
 
-        if window_bins >= n_trimmed:
+        if window_bins <= 0 or window_bins > n:
             return best_win, best_sc, best_idx_full, best_vals
-        max_start = max(0, n - window_bins)
+        max_start = n - window_bins
 
         gstate_in: GaussianWindowState | None = None
 
         for i in range(max_start + 1):
             j = i + window_bins - 1
 
-            inside = np.arange(i, i + window_bins, dtype=np.int64)
-            outside = np.setdiff1d(n, inside, assume_unique=False)
-            W = _get_kernel(n, w, "gaussian")
+            inside  = np.arange(i, i + window_bins, dtype=np.int64)
+            outside = np.setdiff1d(all_full, inside, assume_unique=False)
 
-            if kernel_kind == "gaussian":
+            if kernel_kind == KernelKind.GAUSSIAN:
                 if gstate_in is None:
-                    gstate_in = gaussian_state_init(row, inside, W)
+                    gstate_in = gaussian_state_init(row, inside, W_full)
                 else:
                     rem_idx = i - 1
-                    add_idx = j
-                    gstate_in = gaussian_state_remove_point(row, gstate_in, rem_idx, W)
-                    gstate_in = gaussian_state_add_point(row, gstate_in, add_idx, W)
+                    if rem_idx >= 0:
+                        gstate_in = gaussian_state_remove_point(row, gstate_in, rem_idx, W_full)
+                    gstate_in = gaussian_state_add_point(row, gstate_in, j, W_full)
 
                 sri_inc = gstate_in.sse
-
-                sigma = float(max(range_cap // 3, 1))
                 sro = ssr_region_dispatch(
-                    row,
-                    outside,
-                    W,
-                    ssr_array,
-                    int(i),
-                    int(j),
-                    range_cap,
-                    kernel_kind,
-                    sigma,
+                    row, outside, W_full, ssr_full, i, j, range_cap, kernel_kind,
+                    0.0 if lap_sigma_full is None else lap_sigma_full
                 )
-
                 sc = -(sri_inc + sro)
             else:
                 sc = score_variance_nwkr(
-                    row,
-                    inside,
-                    outside,
-                    int(i),
-                    int(j),
-                    range_cap,
-                    None,
-                    ssr_array,
-                    kernel_kind
+                    row, inside, outside, i, j, range_cap, W_full, ssr_full, kernel_kind,
+                    0.0 if lap_sigma_full is None else lap_sigma_full
                 )
 
-            sc = sc / sra + 1.0
+            sc = sc / sra_full + 1.0
+
             if sc > best_sc:
-                best_sc = sc
-                best_win = (i, j)
-                best_idx_full = inside + buffer
-                sigma = float(max(range_cap // 3, 1))
+                best_sc   = sc
+                best_win  = (i, j)
+                best_idx_full = inside
                 best_vals = predict_on_idxs(
-                    row,
-                    inside,
-                    W,
-                    kernel_kind,
-                    sigma,
+                    row, inside, W_full, kernel_kind,
+                    0.0 if lap_sigma_full is None else lap_sigma_full
                 )
 
-        oi, oj = best_win
-        return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+        return best_win, best_sc, best_idx_full, best_vals
 
 
     best_win_masked, best_sc_masked, sri_idx_masked, sri_vals_masked = _varlen_search(valid_masked)

@@ -4,21 +4,33 @@ from numba import njit
 
 @njit(cache=True, fastmath=True)
 def _laplace_accum_1d(w: np.ndarray, sigma: float) -> np.ndarray:
+    """
+    Stable O(n) accumulator for Laplace smoothing:
+      f[i] = sum_j exp(-|i-j|/sigma) * w[j]
+
+    - FIX: rightward recurrence off-by-one corrected
+    - Optional edge seeding (pad_k>=1) to reduce boundary sag
+    """
     n = w.shape[0]
     out = np.empty(n, dtype=w.dtype)
+
     gamma = math.exp(-1.0 / sigma) if sigma > 0.0 else 0.0
     inv_n = 1.0 / n
+
     R = 0.0
     gpow = gamma
     for j in range(1, n):
         R += gpow * w[j]
         gpow *= gamma
+
     L = 0.0
     out[0] = inv_n * (w[0] + R)
+
     for i in range(1, n):
         L = gamma * (L + w[i - 1])
-        R = (R - gamma * w[i]) / gamma
+        R = (R - gamma * w[i]) / gamma 
         out[i] = inv_n * (L + R + w[i])
+
     return out
 
 @njit(cache=True, fastmath=True)

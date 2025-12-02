@@ -1,11 +1,11 @@
 from __future__ import annotations
 import math
 import numpy as np
-from typing import Any, Dict, Iterable, List, Tuple
-from .predictors import predict_on_idxs
-from .scoring import (calculate_nwkr_sra, calculate_laplace_sra_fast, score_variance_nwkr)
+from typing import Iterable, List, Tuple
+from .scoring import (calculate_nwkr_sra, score_variance_nwkr)
+from .laplace_fast import calculate_laplace_sra_fast
 from .kernels import _get_kernel
-from .config import get_kernel_kind, get_super_resolve_base
+from .config import get_kernel_kind, get_super_resolve_base, KernelKind
 
 def sr_factor(L, r=2, q=2, cap=None):
         L0 = get_super_resolve_base()
@@ -62,8 +62,9 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
         range_cap = range_caps[i]                      # native-scale
         row_trimmed = spec_arrays[i, buffer:L-buffer]
 
-        if kernel_kind == "gaussian":
-            W_trimmed = _get_kernel(n_trimmed, ws[i], "gaussian")
+        if kernel_kind == KernelKind.GAUSSIAN:
+            sigma = 0.0
+            W_trimmed = _get_kernel(n_trimmed, ws[i], KernelKind.GAUSSIAN)
             sra, ssr_array, _ = calculate_nwkr_sra(row_trimmed, W_trimmed)
         else:
             sigma = float(max(ws[i], 1))
@@ -79,15 +80,15 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
         valid_all = np.arange(n_trimmed, dtype=np.int64)
         valid_masked = valid_all[mask]
 
-        def _score_varlen(a: int, b: int, valid: np.ndarray) -> float:
+        def _score_varlen(a: int, b: int, valid: np.ndarray, sigma: float) -> float:
             inside = valid[(valid >= a) & (valid <= b)]
             if inside.size == 0:
                 return -np.inf
             outside = np.setdiff1d(valid_all, inside, assume_unique=False)
-            sc = score_variance_nwkr(row_trimmed, inside, outside, a, b, range_cap, W_trimmed, ssr_array, kernel_kind)
+            sc = score_variance_nwkr(row_trimmed, inside, outside, a, b, range_cap, W_trimmed, ssr_array, kernel_kind, sigma)
             return sc / sra + 1.0
 
-        def _refine_varlen_from_sr(x_sr: int, y_sr: int, valid: np.ndarray) -> Tuple[int,int]:
+        def _refine_varlen_from_sr(x_sr: int, y_sr: int, valid: np.ndarray, sigma: float) -> Tuple[int,int]:
             a_lo = max(x_sr * sr_factor - buffer, 0)
             a_hi = min((x_sr + 1) * sr_factor - 1 - buffer, n_trimmed - 1)
             b_lo = max(y_sr * sr_factor - buffer, 0)
@@ -97,13 +98,13 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
             for a in range(a_lo, a_hi + 1):
                 b_start = max(a, b_lo)
                 for b in range(b_start, b_hi + 1):
-                    sc = _score_varlen(a, b, valid)
+                    sc = _score_varlen(a, b, valid, sigma)
                     if sc > best_sc:
                         best_sc, best_ab = sc, (a, b)
             a_t, b_t = best_ab
             return (a_t + buffer, b_t + buffer)
 
-        def _refine_fixed_from_sr(x_sr: int, y_sr: int) -> Tuple[int,int]:
+        def _refine_fixed_from_sr(x_sr: int, y_sr: int, sigma: float) -> Tuple[int,int]:
             fixed_bins_native = (y_sr - x_sr + 1) * sr_factor
             fixed_bins_native = max(1, min(fixed_bins_native, n_trimmed))
 
@@ -114,7 +115,7 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
             best_sc, best_a = -np.inf, a_lo
             for a in range(a_lo, a_hi + 1):
                 b = b_from_a(a)
-                sc = _score_varlen(a, b, valid_all)
+                sc = _score_varlen(a, b, valid_all, sigma)
                 if sc > best_sc:
                     best_sc, best_a = sc, a
             a_t, b_t = best_a, b_from_a(best_a)
@@ -124,8 +125,8 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
         xu, yu = windows_unmasked_sr[i]
         xf, yf = windows_fixed_sr[i]
 
-        out_masked.append(_refine_varlen_from_sr(xm, ym, valid_masked))
-        out_unmasked.append(_refine_varlen_from_sr(xu, yu, valid_all))
-        out_fixed.append(_refine_fixed_from_sr(xf, yf))
+        out_masked.append(_refine_varlen_from_sr(xm, ym, valid_masked, sigma))
+        out_unmasked.append(_refine_varlen_from_sr(xu, yu, valid_all, sigma))
+        out_fixed.append(_refine_fixed_from_sr(xf, yf, sigma))
 
     return out_masked, out_unmasked, out_fixed
