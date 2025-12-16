@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 from typing import List, Tuple
 from .config import ref_freq, get_kernel_kind, KernelKind
-from .kernels import _get_kernel as _get_kernel
+from .kernels import get_kernel as get_kernel, get_kernel_and_denom
 from .gaussian_state import (
     GaussianWindowState,
     gaussian_state_init,
@@ -10,11 +10,11 @@ from .gaussian_state import (
     gaussian_state_remove_point,
 )
 from .scoring import (
-    calculate_nwkr_sra_with_nd,
+    calculate_gaussian_sra_with_nd,
     gaussian_sro_nearband,
-    score_variance_nwkr,
     laplace_sri,
-    laplace_sro_nearband
+    laplace_sro_nearband,
+    laplace_ssr_window
 )
 from .laplace_fast import calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
@@ -60,17 +60,16 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
             (0,0), -np.inf, 0.0, 0, None, None, 0
         )
     
-    all_full = np.arange(n)
     if kernel_kind == KernelKind.GAUSSIAN:
-        W_full = _get_kernel(n, w, KernelKind.GAUSSIAN)
-        sra_full, ssr_full, _, numer_full, denom_full, ssr_ps_full = calculate_nwkr_sra_with_nd(row, W_full)
-        W_trimmed = _get_kernel(n_trimmed, w, KernelKind.GAUSSIAN)
-        sra, _, pred_array, numer_trim, denom_trim, ssr_ps_trim = calculate_nwkr_sra_with_nd(row_trimmed, W_trimmed)
+        W_full, denom_cached_full = get_kernel_and_denom(n, w, KernelKind.GAUSSIAN)
+        sra_full, _, _, numer_full, denom_full, ssr_ps_full = calculate_gaussian_sra_with_nd(row, W_full, denom_cached_full)
+        W_trimmed, denom_cached_trimmed = get_kernel_and_denom(n_trimmed, w, KernelKind.GAUSSIAN)
+        sra, _, pred_array, numer_trim, denom_trim, ssr_ps_trim = calculate_gaussian_sra_with_nd(row_trimmed, W_trimmed, denom_cached_trimmed)
         sigma = None
     else:
         W_full = None
         sigma = float(max(w, 1))
-        sra_full, ssr_full, _, ssr_ps_full = calculate_laplace_sra_fast(row, sigma)
+        sra_full, _, _, ssr_ps_full = calculate_laplace_sra_fast(row, sigma)
         W_trimmed = None
         sra, _, pred_array, ssr_ps_trim = calculate_laplace_sra_fast(row_trimmed, sigma)
     
@@ -88,8 +87,11 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
     for s0, e0 in ignore_trimmed:
         mask[s0:e0 + 1] = False
 
+    all_full = np.arange(n)
     all_trimmed = np.arange(n_trimmed)
-    valid_masked = np.nonzero(mask)[0]
+    valid_idxs_masked = np.nonzero(mask)[0]
+
+    inside_buf = np.empty(range_cap + 1, dtype=np.int64)
 
     def _varlen_search(valid: np.ndarray) -> Tuple[Tuple[int,int], float, np.ndarray | None, np.ndarray | None]:
         best_sc = -np.inf
@@ -115,7 +117,9 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
 
                 lo = pos_i
                 hi = pos_i + 1 + pos_j
-                inside = valid[lo:hi + 1]
+                m = hi - lo + 1
+                inside_buf[:m] = valid[lo:hi+1]
+                inside = inside_buf[:m]
                 sigma = float(max(w, 1))
 
                 if kernel_kind == KernelKind.GAUSSIAN:
@@ -204,9 +208,9 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                 )
                 sc = -(sri + sro)
             else:
-                outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
-                sri = laplace_sri(row_trimmed, inside, int(i), int(j), sigma)
-                sro = laplace_sro_nearband(row_trimmed, outside, int(i), int(j), range_cap, ssr_ps_full, sigma)
+                outside = np.setdiff1d(all_full, inside, assume_unique=True)
+                sri = laplace_sri(row, inside, int(i), int(j), sigma)
+                sro = laplace_sro_nearband(row, outside, int(i), int(j), range_cap, ssr_ps_full, sigma)
                 sc = -(sri + sro)
 
             sc = sc / sra_full + 1.0
@@ -222,7 +226,7 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
         return best_win, best_sc, best_idx_full, best_vals
 
 
-    best_win_masked, best_sc_masked, sri_idx_masked, sri_vals_masked = _varlen_search(valid_masked)
+    best_win_masked, best_sc_masked, sri_idx_masked, sri_vals_masked = _varlen_search(valid_idxs_masked)
 
     best_win_unmasked, best_sc_unmasked, sri_idx_unmasked, sri_vals_unmasked = _varlen_search(all_trimmed)
     overlap_pct_unmasked = _overlap_stats(best_win_unmasked[0], best_win_unmasked[1], ignore)

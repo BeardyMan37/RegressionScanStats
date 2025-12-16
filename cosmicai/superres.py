@@ -2,9 +2,9 @@ from __future__ import annotations
 import math
 import numpy as np
 from typing import Iterable, List, Tuple
-from .scoring import (calculate_nwkr_sra, score_variance_nwkr)
+from .scoring import (calculate_gaussian_sra, score_variance_nwkr)
 from .laplace_fast import calculate_laplace_sra_fast
-from .kernels import _get_kernel
+from .kernels import get_kernel
 from .config import get_kernel_kind, get_super_resolve_base, KernelKind
 
 def sr_factor(L, r=2, q=2, cap=None):
@@ -64,8 +64,8 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
 
         if kernel_kind == KernelKind.GAUSSIAN:
             sigma = 0.0
-            W_trimmed = _get_kernel(n_trimmed, ws[i], KernelKind.GAUSSIAN)
-            sra, ssr_array, _ = calculate_nwkr_sra(row_trimmed, W_trimmed)
+            W_trimmed = get_kernel(n_trimmed, ws[i], KernelKind.GAUSSIAN)
+            sra, ssr_array, _ = calculate_gaussian_sra(row_trimmed, W_trimmed)
         else:
             sigma = float(max(ws[i], 1))
             W_trimmed = np.empty((1,1), dtype=np.float64)

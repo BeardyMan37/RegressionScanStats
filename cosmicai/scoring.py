@@ -2,10 +2,11 @@ from __future__ import annotations
 import numpy as np
 from numba import njit
 from .config import KernelKind
+from typing import Optional
 from .predictors import predict_on_idxs_laplace
 
 @njit(cache=True, fastmath=True)
-def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray):
+def calculate_gaussian_sra(array: np.ndarray, W: np.ndarray):
     n = array.shape[0]
     numer = np.empty(n, dtype=array.dtype)
     denom = np.empty(n, dtype=array.dtype)
@@ -28,39 +29,26 @@ def calculate_nwkr_sra(array: np.ndarray, W: np.ndarray):
     return ssr, ssr_array, pred_array
 
 @njit(cache=True, fastmath=True)
-def calculate_nwkr_sra_with_nd(array: np.ndarray, W: np.ndarray):
+def calculate_gaussian_sra_with_nd(array: np.ndarray, W: np.ndarray, denom_pre: Optional[np.ndarray] = None):
     n = array.shape[0]
-    numer = np.empty(n, dtype=array.dtype)
-    denom = np.empty(n, dtype=array.dtype)
-
+    numer = W @ array
+    denom = denom_pre[:n]
+    eps = 1e-12
+    pred = numer / np.maximum(denom, eps)
+    ssr_array = (array - pred) ** 2
+    sra = 0.0
     for i in range(n):
-        s_num = 0.0
-        s_den = 0.0
-        for j in range(n):
-            w_ij = W[i, j]
-            s_num += w_ij * array[j]
-            s_den += w_ij
-        numer[i] = s_num
-        denom[i] = s_den
+        sra += ssr_array[i]
 
-    ssr = 0.0
-    ssr_array = np.empty(n, dtype=array.dtype)
-    pred_array = np.empty(n, dtype=array.dtype)
-
-    for i in range(n):
-        d = denom[i]
-        pred = numer[i] / d if d > 0.0 else 0.0
-        pred_array[i] = pred
-        diff = array[i] - pred
-        ssr_array[i] = diff * diff
-        ssr += ssr_array[i]
-
-    ssr_ps = np.empty(n + 1, dtype=array.dtype)
+    ssr_ps = np.empty(n + 1, dtype=np.float64)
     ssr_ps[0] = 0.0
-    for k in range(n):
-        ssr_ps[k + 1] = ssr_ps[k] + ssr_array[k]
+    acc = 0.0
+    for i in range(n):
+        acc += ssr_array[i]
+        ssr_ps[i + 1] = acc
 
-    return ssr, ssr_array, pred_array, numer, denom, ssr_ps
+    return sra, ssr_array, pred, numer, denom, ssr_ps
+
 
 @njit(cache=True, fastmath=True)
 def gaussian_sro_nearband(
@@ -167,13 +155,7 @@ def laplace_sro_nearband(
     if hi < n - 1:
         sro_far += ssr_ps[n] - ssr_ps[hi + 1]
 
-    cnt = 0
-    for t in range(outside.shape[0]):
-        i0 = outside[t]
-        if lo <= i0 <= hi:
-            cnt += 1
-
-    near_out = np.empty(cnt, dtype=outside.dtype)
+    near_out = np.empty(outside.shape[0], dtype=outside.dtype)
     k = 0
     for t in range(outside.shape[0]):
         i0 = outside[t]
@@ -181,15 +163,78 @@ def laplace_sro_nearband(
             near_out[k] = i0
             k += 1
 
-    preds_near = predict_on_idxs_laplace(x, near_out, sigma)
+    if k == 0:
+        return sro_far
+
+    near_slice = near_out[:k]
+    preds_near = predict_on_idxs_laplace(x, near_slice, sigma)
 
     sro_near = 0.0
-    for k in range(near_out.shape[0]):
-        i0 = int(near_out[k])
-        diff = x[i0] - preds_near[k]
+    for t in range(k):
+        i0 = int(near_slice[t])
+        diff = x[i0] - preds_near[t]
         sro_near += diff * diff
 
     return sro_far + sro_near
+
+@njit(cache=True)
+def laplace_ssr_window(array, ssr_ps, idxs, a, b, range_cap, sigma):
+    n_trim = idxs.shape[0]
+    if n_trim == 0:
+        return 0.0
+
+    low_cut = a - (range_cap // 2)
+    high_cut = b + (range_cap // 2)
+
+    recompute_start = -1
+    recompute_end = -1
+    for k in range(n_trim):
+        pos = idxs[k]
+        if pos >= low_cut and pos <= high_cut:
+            if recompute_start == -1:
+                recompute_start = k
+            recompute_end = k
+
+    if recompute_start == -1:
+        return ssr_ps[n_trim]
+
+    m = recompute_end - recompute_start + 1
+    pos_buf = np.empty(m, dtype=np.int64)
+    arr_vals = np.empty(m, dtype=np.float64)
+    for ii in range(m):
+        idx = recompute_start + ii
+        pos_buf[ii] = idxs[idx]
+        arr_vals[ii] = array[idx]
+
+    Lx = np.empty(m, dtype=np.float64)
+    L1 = np.empty(m, dtype=np.float64)
+    Lx[0] = 0.0
+    L1[0] = 0.0
+    for ii in range(1, m):
+        dprev = np.exp(-float(pos_buf[ii] - pos_buf[ii - 1]) / sigma)
+        Lx[ii] = dprev * (Lx[ii - 1] + arr_vals[ii - 1])
+        L1[ii] = dprev * (L1[ii - 1] + 1.0)
+
+    Rx = np.empty(m, dtype=np.float64)
+    R1 = np.empty(m, dtype=np.float64)
+    Rx[m - 1] = 0.0
+    R1[m - 1] = 0.0
+    for ii in range(m - 2, -1, -1):
+        dnext = np.exp(-float(pos_buf[ii + 1] - pos_buf[ii]) / sigma)
+        Rx[ii] = dnext * (Rx[ii + 1] + arr_vals[ii + 1])
+        R1[ii] = dnext * (R1[ii + 1] + 1.0)
+
+    ssr_recomp = 0.0
+    for ii in range(m):
+        num = Lx[ii] + arr_vals[ii] + Rx[ii]
+        den = L1[ii] + 1.0 + R1[ii]
+        pred = num / den
+        diff = arr_vals[ii] - pred
+        ssr_recomp += diff * diff
+
+    ssr_far = ssr_ps[recompute_start] + (ssr_ps[n_trim] - ssr_ps[recompute_end + 1])
+
+    return ssr_recomp + ssr_far
 
 @njit(cache=True, fastmath=True)
 def _ssr_region_laplace(array: np.ndarray, idxs: np.ndarray, ssr_array: np.ndarray,

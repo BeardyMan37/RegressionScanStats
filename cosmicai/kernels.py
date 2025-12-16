@@ -3,7 +3,8 @@ import math, numpy as np
 from typing import Dict, Tuple
 from .config import _KERNEL_ALPHA
 
-_kernel_cache: Dict[Tuple[int, float, str], np.ndarray] = {}
+kernel_cache: Dict[Tuple[int, float, str], np.ndarray] = {}
+kerne_denom_cache: dict = {}
 
 def precompute_kernel(L: int, w: float, kind: str = "gaussian", alpha: float = _KERNEL_ALPHA) -> np.ndarray:
     if w <= 0:
@@ -22,10 +23,20 @@ def precompute_kernel(L: int, w: float, kind: str = "gaussian", alpha: float = _
         return np.exp(-np.power(D / b, alpha))
     raise ValueError(f"Unknown kernel kind: {kind!r}")
 
-def _get_kernel(n: int, w: float, kind: str = "gaussian") -> np.ndarray:
+def get_kernel(n: int, w: float, kind: str = "gaussian") -> np.ndarray:
     key = (n, float(w), kind)
-    K = _kernel_cache.get(key)
+    K = kernel_cache.get(key)
     if K is None:
         K = precompute_kernel(n, w, kind)
-        _kernel_cache[key] = K
+        kernel_cache[key] = K
     return K
+
+def get_kernel_and_denom(n: int, w, kind) -> Tuple[np.ndarray, np.ndarray]:
+    key = (int(n), float(w), str(kind))
+    cached = kerne_denom_cache.get(key)
+    if cached is not None:
+        return cached
+    W = get_kernel(n, w, kind)
+    denom = W.sum(axis=1).astype(np.float64)
+    kerne_denom_cache[key] = (W, denom)
+    return W, denom
