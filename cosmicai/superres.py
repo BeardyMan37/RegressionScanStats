@@ -69,7 +69,7 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
         else:
             sigma = float(max(ws[i], 1))
             W_trimmed = np.empty((1,1), dtype=np.float64)
-            sra, ssr_array, _ = calculate_laplace_sra_fast(row_trimmed, sigma)
+            sra, ssr_array, _, _ = calculate_laplace_sra_fast(row_trimmed, sigma)
 
         mask = np.ones(n_trimmed, dtype=np.bool_)
         for (s, e) in atm_interfs[i]:

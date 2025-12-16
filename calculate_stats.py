@@ -17,8 +17,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-fig", type=int, default=10)
     p.add_argument("--buffer-coeff", type=int, default=20)
     p.add_argument("--workers", type=int, default=None)
-    p.add_argument("--out-root", default="Images")
-    p.add_argument("--data-root", default="Data")
+    p.add_argument("--out-root", default="Images/latest_run")
+    p.add_argument("--data-root", default="Data/latest_run")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     p.add_argument("--kernel-kind", default="gaussian", choices=["gaussian","laplace","laplace_rt"])
     return p

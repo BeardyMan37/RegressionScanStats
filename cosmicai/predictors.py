@@ -5,7 +5,7 @@ from numba import njit
 from .config import KernelKind
 
 @njit(cache=True, fastmath=True)
-def predict_on_idxs_denseW(array: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> np.ndarray:
+def predict_on_idxs_gaussian(array: np.ndarray, idxs: np.ndarray, W: np.ndarray) -> np.ndarray:
     m = idxs.shape[0]
     out = np.empty(m, dtype=array.dtype)
     for ii in range(m):
@@ -84,4 +84,4 @@ def predict_on_idxs(array, idxs, W, kind_str, sigma):
                                        float(sigma))
     if W is None:
         raise ValueError("Dense predictor requires W (got None).")
-    return predict_on_idxs_denseW(array, idxs.astype(np.int64), W)
+    return predict_on_idxs_gaussian(array, idxs.astype(np.int64), W)

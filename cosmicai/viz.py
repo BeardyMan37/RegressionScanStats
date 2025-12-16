@@ -38,8 +38,8 @@ def plot_top_k(
     k: int = 10,
     per_fig: int = 10,
     buffer: int = 10,
-    out_dir: str = "Images",
-    data_dir: str = "Data",
+    out_dir: str = "Images/latest_run",
+    data_dir: str = "Data/latest_run",
     # predictions
     sra_preds: List[np.ndarray] | None = None,
     sri_idxs_masked:  List[np.ndarray | None] | None = None,
@@ -104,12 +104,12 @@ def plot_top_k(
     sub_df = sub_df.sort_values("rank_score", ascending=False).reset_index(drop=True)
     sub_df.insert(0, "uid", sub_df.pop("uid"))
 
-    out_csv = os.path.join(
+    out_file = os.path.join(
         data_dir,
-        f"output_length_{actual_spec_arrays.shape[1]}.csv",
+        f"output_length_{actual_spec_arrays.shape[1]}.parquet",
     )
-    sub_df.to_csv(out_csv, index=False)
-    logging.info("Wrote summary CSV (all windows): %s", out_csv)
+    sub_df.to_parquet(out_file, engine='pyarrow', compression="zstd")
+    logging.info("Wrote summary CSV (all windows): %s", out_file)
 
     # ---- Plot top-k with all windows overlaid ----
     top = order_desc[:min(k, len(order_desc))]

@@ -10,9 +10,11 @@ from .gaussian_state import (
     gaussian_state_remove_point,
 )
 from .scoring import (
-    calculate_nwkr_sra,
-    ssr_region_dispatch,
+    calculate_nwkr_sra_with_nd,
+    gaussian_sro_nearband,
     score_variance_nwkr,
+    laplace_sri,
+    laplace_sro_nearband
 )
 from .laplace_fast import calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
@@ -61,25 +63,19 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
     all_full = np.arange(n)
     if kernel_kind == KernelKind.GAUSSIAN:
         W_full = _get_kernel(n, w, KernelKind.GAUSSIAN)
-        sra_full, ssr_full, _ = calculate_nwkr_sra(row, W_full)
-        lap_sigma_full = None
+        sra_full, ssr_full, _, numer_full, denom_full, ssr_ps_full = calculate_nwkr_sra_with_nd(row, W_full)
+        W_trimmed = _get_kernel(n_trimmed, w, KernelKind.GAUSSIAN)
+        sra, _, pred_array, numer_trim, denom_trim, ssr_ps_trim = calculate_nwkr_sra_with_nd(row_trimmed, W_trimmed)
+        sigma = None
     else:
         W_full = None
-        lap_sigma_full = sigma = float(max(w, 1))
-        sra_full, ssr_full, _ = calculate_laplace_sra_fast(row, lap_sigma_full)
-    sra_full = max(sra_full, 1e-12)
-
-    if kernel_kind == KernelKind.GAUSSIAN:
-        W_trimmed = _get_kernel(n_trimmed, w, KernelKind.GAUSSIAN)
-    else:
-        W_trimmed = None
-    if kernel_kind == KernelKind.GAUSSIAN:
-        sra, ssr_array, pred_array = calculate_nwkr_sra(row_trimmed, W_trimmed)
-        sigma = None
-    elif kernel_kind == KernelKind.LAPLACE:
         sigma = float(max(w, 1))
-        sra, ssr_array, pred_array = calculate_laplace_sra_fast(row_trimmed, sigma)
-    sra = sra if sra > 1e-12 else 1e-12
+        sra_full, ssr_full, _, ssr_ps_full = calculate_laplace_sra_fast(row, sigma)
+        W_trimmed = None
+        sra, _, pred_array, ssr_ps_trim = calculate_laplace_sra_fast(row_trimmed, sigma)
+    
+    sra_full = max(sra_full, 1e-12)
+    sra = sra if sra > 1e-12 else 1e-12    
 
     ignore_trimmed: List[Tuple[int, int]] = []
     for (start, end) in ignore:
@@ -120,7 +116,6 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                 lo = pos_i
                 hi = pos_i + 1 + pos_j
                 inside = valid[lo:hi + 1]
-                outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
                 sigma = float(max(w, 1))
 
                 if kernel_kind == KernelKind.GAUSSIAN:
@@ -130,35 +125,25 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                     else:
                         if new_idx != gstate_in.idxs[-1]:
                             gstate_in = gaussian_state_add_point(row_trimmed, gstate_in, new_idx, W_trimmed)
-                    sri_inc = gstate_in.sse
-
-                    sro = ssr_region_dispatch(
-                        row_trimmed,
-                        outside,
-                        W_trimmed,
-                        ssr_array,
-                        int(i),
-                        int(j),
-                        range_cap,
-                        kernel_kind,
-                        sigma,
-                    )
-
-                    sc = -(sri_inc + sro)
-
-                else:
-                    sc = score_variance_nwkr(
+                    sri = gstate_in.sse
+                    sro = gaussian_sro_nearband(
                         row_trimmed,
                         inside,
-                        outside,
                         int(i),
                         int(j),
                         range_cap,
                         W_trimmed,
-                        ssr_array,
-                        kernel_kind,
-                        sigma
+                        ssr_ps_trim,
+                        numer_trim,
+                        denom_trim,
                     )
+                    sc = -(sri + sro)
+
+                else:
+                    outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
+                    sri = laplace_sri(row_trimmed, inside, int(i), int(j), sigma)
+                    sro = laplace_sro_nearband(row_trimmed, outside, int(i), int(j), range_cap, ssr_ps_trim, sigma)
+                    sc = -(sri + sro)
 
                 sc = sc / sra + 1.0
                 if sc > best_sc:
@@ -195,7 +180,6 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
             j = i + window_bins - 1
 
             inside  = np.arange(i, i + window_bins, dtype=np.int64)
-            outside = np.setdiff1d(all_full, inside, assume_unique=False)
 
             if kernel_kind == KernelKind.GAUSSIAN:
                 if gstate_in is None:
@@ -206,17 +190,24 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                         gstate_in = gaussian_state_remove_point(row, gstate_in, rem_idx, W_full)
                     gstate_in = gaussian_state_add_point(row, gstate_in, j, W_full)
 
-                sri_inc = gstate_in.sse
-                sro = ssr_region_dispatch(
-                    row, outside, W_full, ssr_full, i, j, range_cap, kernel_kind,
-                    0.0 if lap_sigma_full is None else lap_sigma_full
+                sri = gstate_in.sse
+                sro = gaussian_sro_nearband(
+                    row,
+                    inside,
+                    int(i),
+                    int(j),
+                    range_cap,
+                    W_full,
+                    ssr_ps_full,
+                    numer_full,
+                    denom_full,
                 )
-                sc = -(sri_inc + sro)
+                sc = -(sri + sro)
             else:
-                sc = score_variance_nwkr(
-                    row, inside, outside, i, j, range_cap, W_full, ssr_full, kernel_kind,
-                    0.0 if lap_sigma_full is None else lap_sigma_full
-                )
+                outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
+                sri = laplace_sri(row_trimmed, inside, int(i), int(j), sigma)
+                sro = laplace_sro_nearband(row_trimmed, outside, int(i), int(j), range_cap, ssr_ps_full, sigma)
+                sc = -(sri + sro)
 
             sc = sc / sra_full + 1.0
 
@@ -225,8 +216,7 @@ def scan_row(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, in
                 best_win  = (i, j)
                 best_idx_full = inside
                 best_vals = predict_on_idxs(
-                    row, inside, W_full, kernel_kind,
-                    0.0 if lap_sigma_full is None else lap_sigma_full
+                    row, inside, W_full, kernel_kind, sigma
                 )
 
         return best_win, best_sc, best_idx_full, best_vals
