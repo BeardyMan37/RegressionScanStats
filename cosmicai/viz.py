@@ -153,7 +153,10 @@ def plot_top_k(
             # Window overlays (distinct alphas)
             am0, am1 = _clamp_pair(a_m, b_m, len(freq))
             au0, au1 = _clamp_pair(a_u, b_u, len(freq))
-            af0, af1 = _clamp_pair(a_f, b_f, len(freq))
+            if a_f != -1 or b_f != -1: 
+                af0, af1 = _clamp_pair(a_f, b_f, len(freq)) 
+            else: 
+                af0, af1 = 0, 0
             if am0 < am1: ax.axvspan(float(freq[am0]), float(freq[am1]), color="C1", alpha=0.35, label=None)
             if au0 < au1: ax.axvspan(float(freq[au0]), float(freq[au1]), color="C2", alpha=0.25, label=None)
             if af0 < af1: ax.axvspan(float(freq[af0]), float(freq[af1]), color="C3", alpha=0.25, label=None)
@@ -186,7 +189,8 @@ def plot_top_k(
 
             _plot_sri(sri_idxs_masked,   sri_vals_masked,   "SRI masked", "C5")
             _plot_sri(sri_idxs_unmasked, sri_vals_unmasked, "SRI unmasked", "C6")
-            _plot_sri(sri_idxs_fixed,    sri_vals_fixed,    "SRI fixed", "C7")
+            if af0 < af1: 
+                _plot_sri(sri_idxs_fixed,    sri_vals_fixed,    "SRI fixed", "C7")
 
             # Title with all scores (+overlaps if available)
             parts = [

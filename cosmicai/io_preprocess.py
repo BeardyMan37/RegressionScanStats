@@ -111,7 +111,7 @@ def load_data_by_length(data_path: str, interference_path: str):
 
         df["atmospheric_interference"] = interference
 
-        actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude_corr_tsys"].tolist()]
+        actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude"].tolist()]
         freqs = [np.asarray(x, dtype=float) for x in df["frequency_array"].tolist()]
 
     else:
@@ -127,8 +127,8 @@ def load_data_by_length(data_path: str, interference_path: str):
     atm_intrf = list(df["atmospheric_interference"])
     uid = df["uid"].to_numpy()
     ref = df["ref_antenna_name"].to_numpy()
-    ant = df["antenna"].to_numpy()
-    pol = df["polarization"].to_numpy()
+    ant = df["antenna_name"].to_numpy()
+    pol = df["pol_id"].to_numpy()
 
     length_groups: Dict[int, List[int]] = {}
     for i, s in enumerate(actual_specs):

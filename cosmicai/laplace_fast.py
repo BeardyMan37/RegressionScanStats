@@ -12,25 +12,21 @@ def _laplace_accum_1d(w: np.ndarray, sigma: float) -> np.ndarray:
     - Optional edge seeding (pad_k>=1) to reduce boundary sag
     """
     n = w.shape[0]
-    out = np.empty(n, dtype=w.dtype)
+    gamma = math.exp(-1.0 / sigma)
 
-    gamma = math.exp(-1.0 / sigma) if sigma > 0.0 else 0.0
-    inv_n = 1.0 / n
-
-    R = 0.0
-    gpow = gamma
-    for j in range(1, n):
-        R += gpow * w[j]
-        gpow *= gamma
-
-    L = 0.0
-    out[0] = inv_n * (w[0] + R)
-
+    Lx = np.zeros(n)
+    L1 = np.zeros(n)
     for i in range(1, n):
-        L = gamma * (L + w[i - 1])
-        R = (R - gamma * w[i]) / gamma 
-        out[i] = inv_n * (L + R + w[i])
+        Lx[i] = gamma * (Lx[i-1] + w[i-1])
+        L1[i] = gamma * (L1[i-1] + 1.0)
 
+    Rx = np.zeros(n)
+    R1 = np.zeros(n)
+    for i in range(n-2, -1, -1):
+        Rx[i] = gamma * (Rx[i+1] + w[i+1])
+        R1[i] = gamma * (R1[i+1] + 1.0)
+
+    out = (Lx + w + Rx) / np.maximum(L1 + 1.0 + R1, 1e-12)
     return out
 
 @njit(cache=True, fastmath=True)

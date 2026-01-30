@@ -4,7 +4,7 @@ from typing import Dict
 from cosmicai.config import set_kernel_kind, get_kernel_kind
 from cosmicai.io_preprocess import load_data_by_length
 from cosmicai.warmup import warmup_numba_and_caches
-from cosmicai.scan import scan_row
+from cosmicai.scan import scan_row_with_nwkr
 from cosmicai.parallel_exec import polynomial_scan_ranges_parallel
 from cosmicai.superres import sr_factor, superresolve_ranges, superresolve, refine_all_windows_exact_for_length
 from cosmicai.viz import plot_top_k
@@ -58,7 +58,7 @@ def main() -> None:
          windows_sr_fixed, scores_fixed, overlap_fix_pct, sri_idxs_fix, sri_vals_fix, fixed_bins_nat
         ) = polynomial_scan_ranges_parallel(
             spec_arrays=actual_specs_sr,
-            score_fn=scan_row,
+            score_fn=scan_row_with_nwkr,
             atm_interfs=atm_interfs_sr,
             freq_arrays=freqs_sr,
             buffer=BUFFER // SR_FACTOR,

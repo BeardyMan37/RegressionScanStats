@@ -7,7 +7,7 @@ from .scoring import calculate_gaussian_sra
 from .laplace_fast import calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
 from .scoring import ssr_region_dispatch
-from .scan import scan_row
+from .scan import scan_row_with_nwkr
 
 def _estimate_w_from_freqs(freqs_row: np.ndarray, sr_factor: int = 1) -> int:
     step = float(np.median(np.diff(freqs_row))) if len(freqs_row) > 1 else ref_freq
@@ -69,7 +69,7 @@ def warmup_numba_and_caches(
     for k in kinds:
         set_kernel_kind(k)                     
         params = _build_tiny_scan_param(L=max(32, small_n), kind=k)
-        _ = scan_row(params)
+        _ = scan_row_with_nwkr(params)
     set_kernel_kind(old)
 
     _jit_touch_laplace_path(n=small_n, sigma=16.0)
