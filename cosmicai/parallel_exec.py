@@ -3,10 +3,10 @@ from typing import Any, List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from .warmup import worker_warmup
 
-def polynomial_scan_ranges_parallel(spec_arrays, score_fn, atm_interfs, freq_arrays, buffer, sr_factor, max_workers=None):
+def polynomial_scan_ranges_parallel(spec_arrays, score_fn, atm_interfs, flag_ranges, freq_arrays, buffer, sr_factor, max_workers=None):
     n_rows, _ = spec_arrays.shape
     params = [
-        (i, spec_arrays[i], atm_interfs[i], freq_arrays[i], buffer, sr_factor)
+        (i, spec_arrays[i], atm_interfs[i], flag_ranges[i], freq_arrays[i], buffer, sr_factor)
         for i in range(n_rows)
     ]
 

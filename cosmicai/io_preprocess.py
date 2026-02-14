@@ -2,6 +2,7 @@ from __future__ import annotations
 import os, ast, numpy as np, pandas as pd
 from typing import Dict, List, Tuple
 from scipy.signal import find_peaks, peak_widths
+from itertools import groupby
 
 def match_and_correct(freq_array, trans_freqs, trans_vals) -> np.ndarray:
     idxs = np.searchsorted(trans_freqs, freq_array)
@@ -111,6 +112,17 @@ def load_data_by_length(data_path: str, interference_path: str):
 
         df["atmospheric_interference"] = interference
 
+        def true_ranges(arr):
+            ranges = []
+            idx = 0
+            for val, group in groupby(arr):
+                length = sum(1 for _ in group)
+                if val:
+                    ranges.append((idx, idx + length - 1))
+                idx += length
+            return ranges
+        
+        df["flag_ranges"] = df["flag_array"].apply(true_ranges)
         actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude"].tolist()]
         freqs = [np.asarray(x, dtype=float) for x in df["frequency_array"].tolist()]
 
@@ -125,6 +137,7 @@ def load_data_by_length(data_path: str, interference_path: str):
     actual_specs = list(df["_actual_spec"])
     freqs = list(df["_freqs"])
     atm_intrf = list(df["atmospheric_interference"])
+    flag_ranges = list(df["flag_ranges"])
     uid = df["uid"].to_numpy()
     ref = df["ref_antenna_name"].to_numpy()
     ant = df["antenna_name"].to_numpy()
@@ -135,15 +148,16 @@ def load_data_by_length(data_path: str, interference_path: str):
         L = s.shape[0]
         length_groups.setdefault(L, []).append(i)
 
-    groups: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, int]]]]] = {}
+    groups: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int, int]]]], List[List[Tuple[int, int]]]] = {}
     for L, idxs in length_groups.items():
         actual_specs_L = np.vstack([actual_specs[i] for i in idxs])
         freqs_L = np.vstack([freqs[i] for i in idxs])
         atm_intrf_L = [atm_intrf[i] for i in idxs]
+        flag_ranges_L = [flag_ranges[i] for i in idxs]
         uid_L = uid[idxs]
         ref_L = ref[idxs]
         ant_L = ant[idxs]
         pol_L = pol[idxs]
-        groups[L] = (actual_specs_L, uid_L, ref_L, ant_L, pol_L, freqs_L, atm_intrf_L)
+        groups[L] = (actual_specs_L, uid_L, ref_L, ant_L, pol_L, freqs_L, atm_intrf_L, flag_ranges_L)
 
     return df, groups

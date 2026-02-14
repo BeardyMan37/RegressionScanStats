@@ -40,9 +40,10 @@ def _build_tiny_scan_param(L: int, kind: str) -> tuple:
     row = np.random.rand(L).astype(np.float64)
     freqs = (np.arange(L, dtype=np.float64) * ref_freq)
     ignore: List[Tuple[int, int]] = [(max(1, L//6), min(L-2, L//6 + 4))]
+    flags: List[Tuple[int, int]] = [(0, 1)]
     buffer = max(1, L // 32)
     sr_factor = 1
-    return (0, row, ignore, freqs, buffer, sr_factor)
+    return (0, row, ignore, flags, freqs, buffer, sr_factor)
 
 def warmup_numba_and_caches(
     groups: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[List[Tuple[int,int]]]]],
@@ -52,7 +53,7 @@ def warmup_numba_and_caches(
 ) -> None:
     lengths = sorted(groups.keys())
     for L in lengths:
-        specs, _, _, _, _, freqs, _ = groups[L]
+        specs, _, _, _, _, freqs, _, _ = groups[L]
         # choose a few rows to estimate widths that will actually be used
         for i in range(0, min(sample_per_length, specs.shape[0])):
             w_bins = _estimate_w_from_freqs(np.asarray(freqs[i], dtype=np.float64))

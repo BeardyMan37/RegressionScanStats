@@ -40,12 +40,13 @@ def main() -> None:
 
     for length in sorted(groups):
         BUFFER = length // args.buffer_coeff
-        actual_specs, uid, ref, ant, pol, freqs, atm_interfs = groups[length]
+        actual_specs, uid, ref, ant, pol, freqs, atm_interfs, flag_ranges = groups[length]
         n_rows, row_len = actual_specs.shape
         logging.info("Before Preprocessing: Length=%d: %d rows, %d channels", length, n_rows, row_len)
 
         SR_FACTOR = length_SR_FACTOR_map.get(length, 1)
         atm_interfs_sr = superresolve_ranges(atm_interfs, factor=SR_FACTOR)
+        flag_ranges_sr = superresolve_ranges(flag_ranges, factor=SR_FACTOR)
         actual_specs_sr = superresolve(actual_specs, factor=SR_FACTOR)
         freqs_sr = superresolve(freqs, factor=SR_FACTOR)
 
@@ -60,6 +61,7 @@ def main() -> None:
             spec_arrays=actual_specs_sr,
             score_fn=scan_row_with_nwkr,
             atm_interfs=atm_interfs_sr,
+            flag_ranges=flag_ranges_sr,
             freq_arrays=freqs_sr,
             buffer=BUFFER // SR_FACTOR,
             sr_factor=SR_FACTOR,

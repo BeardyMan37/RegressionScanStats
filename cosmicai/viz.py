@@ -58,6 +58,8 @@ def plot_top_k(
     buf_orig = buffer
 
     # Choose score vector for ranking
+    if len(actual_spec_arrays[0]) == 32:
+        print(scores_fixed)
     score_map_all = {
         "masked":   np.asarray(scores_masked, dtype=float),
         "unmasked": np.asarray(scores_unmasked, dtype=float),
@@ -71,10 +73,13 @@ def plot_top_k(
     finite = np.isfinite(scores_rank)
     idx_all = np.where(finite)[0]
     order_desc = idx_all[np.argsort(scores_rank[finite])[:]][::-1]
+    
 
     # Build CSV (for *all* rows in the filtered ordering)
     top_uids = np.asarray(meta["uid"])[order_desc]
     kernel_sizes = np.asarray(ws, dtype=object)[order_desc]
+    order_desc = order_desc[order_desc < len(kernel_sizes)]
+
 
     sub_df = df.loc[df["uid"].isin(top_uids)].copy()
 

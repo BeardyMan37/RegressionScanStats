@@ -96,19 +96,19 @@ def scan_row_with_regressor(
     return best_score, best_a, best_b
 
 
-def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.ndarray, int, int]):
-    row_idx, row, ignore, freqs, buffer, sr_factor = params[:6]
+def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], List[Tuple[int,int]], np.ndarray, int, int]):
+    row_idx, row, ignore, flags, freqs, buffer, sr_factor = params[:7]
 
     w_override = None
     range_cap_override = None
     fixed_bins_override = None
 
-    if len(params) >= 7:
-        w_override = params[6]
     if len(params) >= 8:
-        range_cap_override = params[7]
+        w_override = params[7]
     if len(params) >= 9:
-        fixed_bins_override = params[8]
+        range_cap_override = params[8]
+    if len(params) >= 10:
+        fixed_bins_override = params[9]
 
     n = row.shape[0]
     kernel_kind = get_kernel_kind()
@@ -196,6 +196,12 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
         if s0 <= e0:
             ignore_trimmed.append((s0, e0))
 
+    for (start, end) in flags:
+        s0 = max(start - buffer, 0)
+        e0 = min(end - buffer, n_trimmed - 1)
+        if s0 <= e0:
+            ignore_trimmed.append((s0, e0))
+
     mask = np.ones(n_trimmed, dtype=np.bool_)
     for s0, e0 in ignore_trimmed:
         mask[s0:e0 + 1] = False
@@ -207,10 +213,13 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
     inside_buf = np.empty(range_cap + 1, dtype=np.int64)
 
     def _varlen_search(valid: np.ndarray) -> Tuple[Tuple[int, int], float, np.ndarray | None, np.ndarray | None]:
-        best_sc = -np.inf
-        best_win = (0, 0)
-        best_idx_full = None
-        best_vals = None
+        best_sc_var = 0
+        best_win_var = (0, 0)
+        best_idx_full_var = None
+        best_vals_var = None
+
+        if len(valid) < 2:
+            return best_win_var, best_sc_var, best_idx_full_var, best_vals_var
 
         n_valid = valid.shape[0]
         for pos_i in range(n_valid):
@@ -277,6 +286,7 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
 
                 else:
                     outside = np.setdiff1d(all_trimmed, inside, assume_unique=True)
+                    sigma = float(max(w, 1))
                     sri = laplace_sri(row_trimmed, inside, int(i), int(j), sigma)
                     sro = laplace_sro_nearband(
                         row_trimmed,
@@ -291,12 +301,12 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
 
                 sc = sc / sra + 1.0
 
-                if sc > best_sc:
-                    best_sc = sc
-                    best_win = (i, j)
-                    best_idx_full = inside + buffer
+                if sc > best_sc_var:
+                    best_sc_var = sc
+                    best_win_var = (i, j)
+                    best_idx_full_var = inside + buffer
                     sigma = float(max(w, 1))
-                    best_vals = predict_on_idxs(
+                    best_vals_var = predict_on_idxs(
                         row_trimmed,
                         inside,
                         W_trimmed,
@@ -304,17 +314,17 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
                         sigma,
                     )
 
-        oi, oj = best_win
-        return (oi + buffer, oj + buffer), best_sc, best_idx_full, best_vals
+        oi, oj = best_win_var
+        return (oi + buffer, oj + buffer), best_sc_var, best_idx_full_var, best_vals_var
 
     def _fixedlen_sweep() -> Tuple[Tuple[int, int], float, np.ndarray | None, np.ndarray | None]:
-        best_sc = -np.inf
-        best_win = (0, 0)
-        best_idx_full = None
-        best_vals = None
+        best_sc_fix = 0
+        best_win_fix = (0, 0)
+        best_idx_full_fix = None
+        best_vals_fix = None
 
         if window_bins <= 0 or window_bins > n:
-            return best_win, best_sc, best_idx_full, best_vals
+            return best_win_fix, best_sc_fix, best_idx_full_fix, best_vals_fix
 
         max_start = n - window_bins
 
@@ -409,11 +419,11 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
 
             sc = sc / sra_full + 1.0
 
-            if sc > best_sc:
-                best_sc = sc
-                best_win = (i, j)
-                best_idx_full = inside
-                best_vals = predict_on_idxs(
+            if sc > best_sc_fix:
+                best_sc_fix = sc
+                best_win_fix = (i, j)
+                best_idx_full_fix = inside
+                best_vals_fix = predict_on_idxs(
                     row,
                     inside,
                     W_full,
@@ -421,7 +431,7 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
                     sigma,
                 )
 
-        return best_win, best_sc, best_idx_full, best_vals
+        return best_win_fix, best_sc_fix, best_idx_full_fix, best_vals_fix
 
 
 
@@ -431,7 +441,7 @@ def scan_row_with_nwkr(params: Tuple[int, np.ndarray, List[Tuple[int,int]], np.n
     best_win_unmasked, best_sc_unmasked, sri_idx_unmasked, sri_vals_unmasked = _varlen_search(all_trimmed)
     overlap_pct_unmasked = _overlap_stats(best_win_unmasked[0], best_win_unmasked[1], ignore)
 
-    best_win_fixed, best_sc_fixed, sri_idx_fixed, sri_vals_fixed, overlap_pct_fixed = (-1, -1), -1, None, None, -1
+    best_win_fixed, best_sc_fixed, sri_idx_fixed, sri_vals_fixed, overlap_pct_fixed = (0, 0), 0, None, None, 0
     
     if fixed_len_flag == True:
         best_win_fixed, best_sc_fixed, sri_idx_fixed, sri_vals_fixed = _fixedlen_sweep()

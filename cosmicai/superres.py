@@ -119,7 +119,7 @@ def refine_all_windows_exact_for_length(spec_arrays, windows_masked_sr, windows_
                 if sc > best_sc:
                     best_sc, best_a = sc, a
             a_t, b_t = best_a, b_from_a(best_a)
-            return (a_t + buffer, b_t + buffer)
+            return (a_t, b_t)
 
         xm, ym = windows_masked_sr[i]
         xu, yu = windows_unmasked_sr[i]

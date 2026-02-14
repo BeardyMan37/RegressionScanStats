@@ -27,12 +27,12 @@ class SpectrumSpec:
 
 
 DEFAULT_GROUPS: List[SpectrumSpec] = [
-    SpectrumSpec(100,  2, 50),
-    SpectrumSpec(100, 3, 50),
-    SpectrumSpec(200, 4, 50),
-    SpectrumSpec(200, 6, 50),
-    SpectrumSpec(500, 10, 50),
-    SpectrumSpec(500, 15, 50),
+    SpectrumSpec(100, 10, 50),
+    SpectrumSpec(100, 12, 50),
+    SpectrumSpec(200, 20, 50),
+    SpectrumSpec(200, 25, 50),
+    SpectrumSpec(500, 25, 50),
+    SpectrumSpec(500, 30, 50),
 ]
 
 
@@ -65,7 +65,7 @@ def _lowpass_random_field(n: int, rng: np.random.Generator, sigma_bins: float) -
     """
     z = rng.normal(0.0, 1.0, size=n).astype(np.float64)
 
-    r = int(max(3, round(4.0 * sigma_bins)))
+    r = int(min(n // 2 - 1, max(3, round(4.0 * sigma_bins))))
     t = np.arange(-r, r + 1, dtype=np.float64)
     k = np.exp(-0.5 * (t / max(sigma_bins, 1e-6)) ** 2)
     k /= (k.sum() + 1e-12)
@@ -311,29 +311,40 @@ def _add_rect_step(
     y: np.ndarray,
     W: int,
     rng: np.random.Generator,
-    strength: float = 0.05,   # magnitude relative to local level
-    width_frac: float = 0.01,    # width ~ W
+    strength: float = 5.0,          # now interpreted as "k sigma"
+    width_frac: float = 0.2,
     center_range: Tuple[float, float] = (0.10, 0.90),
 ) -> Tuple[int, int]:
     """
-    Rectangular step anomaly that *preserves noise* by adding an offset rather than overwriting.
-    Returns (start,end).
+    Rectangular step anomaly whose magnitude is k × local noise std.
+
+    strength = k (number of standard deviations)
     """
+
     n = y.size
-    width = int(width_frac * n)
-    start = int(rng.integers(int(0.1 * n), int(0.9 * n - width)))
+    width = max(1, int(width_frac * n))
+
+    start = int(rng.integers(int(center_range[0] * n),
+                             int(center_range[1] * n - width)))
     end = start + width - 1
 
-    seg = y[start:end + 1].copy()                 # keep existing noisy segment
-    local_level = float(seg.mean())
-    offset = strength * local_level
+    seg = y[start:end + 1].copy()
+
+    # Estimate local noise level via robust std
+    local_std = float(np.std(y))
+
+    # If region is extremely smooth, avoid zero anomaly
+    local_std = max(local_std, 1e-8)
+
+    offset = strength * local_std
 
     if rng.random() < 0.5:
-        y[start:end + 1] = seg + offset           # up-step, noise preserved
+        y[start:end + 1] = seg + offset
     else:
-        y[start:end + 1] = np.maximum(0.0, seg - offset)  # down-step, noise preserved
+        y[start:end + 1] = seg - offset
 
-    return start - 1, end + 1
+    return start, end
+
 
 def _allocate_exact_strong_counts(groups: List[SpectrumSpec], strong_rate: float) -> List[int]:
     """
@@ -410,7 +421,7 @@ def generate_single_spectrum(
         elif k in ("gaussian_emission", "gauss_em", "em"):
             s, e = _add_gaussian_feature(y, W, rng, kind="emission")
         elif k in ("rect_step", "step"):
-            s, e = _add_rect_step(y, W, rng)
+            s, e = _add_rect_step(y, W, rng, strength=1, width_frac=0.05)
         else:
             raise ValueError(f"Unknown strong_kind={strong_kind!r}")
 
@@ -430,7 +441,7 @@ def generate_single_spectrum(
     #     ignore_ranges.append((s_i, e_i))
 
     return {
-        "y": y.astype(np.float32),
+        "y": y.astype(np.float64),
         "has_strong_anom": bool(has_strong),
         "strong_intervals": strong_intervals,
         # "weak_intervals": weak_intervals,
@@ -476,7 +487,7 @@ def generate_synthetic_dataset(
         length = spec.length
         n_rows = spec.n_rows
 
-        spectra = np.empty((n_rows, length), dtype=np.float32)
+        spectra = np.empty((n_rows, length), dtype=np.float64)
         strong_flags = np.zeros(n_rows, dtype=bool)
 
         strong_labels: List[List[Tuple[int, int]]] = []
