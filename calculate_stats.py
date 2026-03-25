@@ -17,8 +17,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--per-fig", type=int, default=10)
     p.add_argument("--buffer-coeff", type=int, default=20)
     p.add_argument("--workers", type=int, default=None)
-    p.add_argument("--out-root", default="Images/latest_run")
-    p.add_argument("--data-root", default="Data/latest_run")
+    p.add_argument("--out-root", default="images/latest_run")
+    p.add_argument("--data-root", default="data/latest_run")
     p.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
     p.add_argument("--kernel-kind", default="gaussian", choices=["gaussian","laplace","laplace_rt"])
     return p
@@ -76,7 +76,7 @@ def main() -> None:
 
         if SR_FACTOR > 1:
             windows_exact_masked, windows_exact_unmasked, windows_exact_fixed = refine_all_windows_exact_for_length(
-                actual_specs, windows_sr_masked, windows_sr_unmasked, windows_sr_fixed,
+                actual_specs, freqs, windows_sr_masked, windows_sr_unmasked, windows_sr_fixed,
                 atm_interfs, ws, range_caps, SR_FACTOR, BUFFER)
         else:
             windows_exact_masked   = windows_sr_masked

@@ -85,3 +85,38 @@ def predict_on_idxs(array, idxs, W, kind_str, sigma):
     if W is None:
         raise ValueError("Dense predictor requires W (got None).")
     return predict_on_idxs_gaussian(array, idxs.astype(np.int64), W)
+
+@njit(cache=True, fastmath=True)
+def predict_on_idxs_trunc(array: np.ndarray, idxs: np.ndarray, k: np.ndarray) -> np.ndarray:
+    m = idxs.shape[0]
+    r = k.shape[0] - 1
+    out = np.empty(m, dtype=np.float64)
+
+    for ii in range(m):
+        i0 = idxs[ii]
+        num = 0.0
+        den = 0.0
+
+        jj = ii
+        while jj >= 0:
+            d = i0 - idxs[jj]
+            if d > r:
+                break
+            w = k[d]
+            num += w * array[idxs[jj]]
+            den += w
+            jj -= 1
+
+        jj = ii + 1
+        while jj < m:
+            d = idxs[jj] - i0
+            if d > r:
+                break
+            w = k[d]
+            num += w * array[idxs[jj]]
+            den += w
+            jj += 1
+
+        out[ii] = num / den if den > 1e-12 else 0.0
+
+    return out

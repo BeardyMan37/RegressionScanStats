@@ -3,8 +3,7 @@ import numpy as np
 from typing import Dict, Tuple, List
 from .config import ref_freq, get_kernel_kind, set_kernel_kind
 from .kernels import get_kernel as get_kernel
-from .scoring import calculate_gaussian_sra
-from .laplace_fast import calculate_laplace_sra_fast
+from .scoring import calculate_gaussian_sra, calculate_laplace_sra_fast
 from .predictors import predict_on_idxs
 from .scoring import ssr_region_dispatch
 from .scan import scan_row_with_nwkr

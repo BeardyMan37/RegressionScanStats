@@ -58,8 +58,6 @@ def plot_top_k(
     buf_orig = buffer
 
     # Choose score vector for ranking
-    if len(actual_spec_arrays[0]) == 32:
-        print(scores_fixed)
     score_map_all = {
         "masked":   np.asarray(scores_masked, dtype=float),
         "unmasked": np.asarray(scores_unmasked, dtype=float),

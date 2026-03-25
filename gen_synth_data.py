@@ -27,12 +27,7 @@ class SpectrumSpec:
 
 
 DEFAULT_GROUPS: List[SpectrumSpec] = [
-    SpectrumSpec(100, 10, 50),
-    SpectrumSpec(100, 12, 50),
-    SpectrumSpec(200, 20, 50),
-    SpectrumSpec(200, 25, 50),
-    SpectrumSpec(500, 25, 50),
-    SpectrumSpec(500, 30, 50),
+    SpectrumSpec(500, 50, 1000)
 ]
 
 
@@ -390,6 +385,7 @@ def generate_single_spectrum(
     # buffer_frac: float = 0.03,
     strong_kind: str = "right_notch",      # "gaussian_absorption" | "rect_step" | "gaussian_emission" | "right_notch"
     force_strong: bool | None = None,      # if set, overrides Bernoulli draw
+    error_params: Tuple[float, float] | None = (2.5, 0.05),
 ) -> Dict[str, Any]:
 
     """
@@ -421,7 +417,7 @@ def generate_single_spectrum(
         elif k in ("gaussian_emission", "gauss_em", "em"):
             s, e = _add_gaussian_feature(y, W, rng, kind="emission")
         elif k in ("rect_step", "step"):
-            s, e = _add_rect_step(y, W, rng, strength=1, width_frac=0.05)
+            s, e = _add_rect_step(y, W, rng, strength=error_params[0], width_frac=error_params[1])
         else:
             raise ValueError(f"Unknown strong_kind={strong_kind!r}")
 
@@ -429,11 +425,11 @@ def generate_single_spectrum(
 
 
     # weak lines: subtle
-    if rng.random() < p_weak_line:
-        for _ in range(rng.integers(1, 3)):
-            kind = "absorption" if rng.random() < 0.75 else "emission"
-            s, e = _add_weak_line(y, rng, kind=kind)
-            # weak_intervals.append((s, e))
+    # if rng.random() < p_weak_line:
+    #     for _ in range(rng.integers(1, 3)):
+    #         kind = "absorption" if rng.random() < 0.75 else "emission"
+    #         s, e = _add_weak_line(y, rng, kind=kind)
+    #         weak_intervals.append((s, e))
 
     # interference spikes: mostly on non-strong rows; treat as ignored region
     # if (not has_strong) and (rng.random() < p_interference):
@@ -459,6 +455,7 @@ def generate_synthetic_dataset(
     strong_rate: float = 0.05,
     strong_kind: str = "right_notch",
     exact_strong: bool = True,
+    error_params: Tuple[float, float] | None = (2.5, 0.05), 
 ) -> Dict[str, Any]:
 
     """
@@ -512,6 +509,7 @@ def generate_synthetic_dataset(
                 # buffer_frac=0.03,
                 strong_kind=strong_kind,
                 force_strong=(r in strong_set) if exact_strong else None,
+                error_params=error_params,
             )
 
             spectra[r, :] = row["y"]

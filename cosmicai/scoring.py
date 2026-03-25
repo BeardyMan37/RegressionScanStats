@@ -1,9 +1,32 @@
 from __future__ import annotations
+import math
 import numpy as np
 from numba import njit
 from .config import KernelKind
 from typing import Optional
-from .predictors import predict_on_idxs_laplace
+from .predictors import predict_on_idxs_laplace, predict_on_idxs_trunc
+
+def _nwkr_predict_subset(y: np.ndarray, K: np.ndarray, subset: np.ndarray) -> np.ndarray:
+    """
+    Predict y_hat on 'subset' using NWKR trained on 'subset':
+      y_hat[i] = sum_{j in subset} K[i,j] y[j] / sum_{j in subset} K[i,j]
+    evaluated only for i in subset (so output length = len(subset)).
+
+    This is the most direct analogue of your inside/outside fits.
+    """
+    # weights submatrix: K[subset, subset]
+    W = K[np.ix_(subset, subset)]  # shape (m,m)
+    denom = W.sum(axis=1)
+    denom = np.maximum(denom, 1e-12)
+    numer = W @ y[subset]
+    return numer / denom
+
+def _nwkr_sse_on_subset(y: np.ndarray, K: np.ndarray, subset: np.ndarray) -> float:
+    if subset.size == 0:
+        return 0.0
+    yhat = _nwkr_predict_subset(y, K, subset)
+    resid = y[subset] - yhat
+    return float(np.dot(resid, resid))
 
 @njit(cache=True, fastmath=True)
 def calculate_gaussian_sra(array: np.ndarray, W: np.ndarray):
@@ -36,6 +59,58 @@ def calculate_gaussian_sra_with_nd(array: np.ndarray, W: np.ndarray, denom_pre: 
     eps = 1e-12
     pred = numer / np.maximum(denom, eps)
     ssr_array = (array - pred) ** 2
+    sra = 0.0
+    for i in range(n):
+        sra += ssr_array[i]
+
+    ssr_ps = np.empty(n + 1, dtype=np.float64)
+    ssr_ps[0] = 0.0
+    acc = 0.0
+    for i in range(n):
+        acc += ssr_array[i]
+        ssr_ps[i + 1] = acc
+
+    return sra, ssr_array, pred, numer, denom, ssr_ps
+
+@njit(cache=True, fastmath=True)
+def calculate_gaussian_sra_trunc(
+    array: np.ndarray,
+    k: np.ndarray,
+):
+    n = array.shape[0]
+    r = k.shape[0] - 1
+    eps = 1e-12
+
+    numer = np.empty(n, dtype=np.float64)
+    denom = np.empty(n, dtype=np.float64)
+    pred  = np.empty(n, dtype=np.float64)
+    ssr_array = np.empty(n, dtype=np.float64)
+
+    for i in range(n):
+        j0 = i - r
+        if j0 < 0:
+            j0 = 0
+        j1 = i + r
+        if j1 > n - 1:
+            j1 = n - 1
+
+        num = 0.0
+        den = 0.0
+        for j in range(j0, j1 + 1):
+            d = i - j
+            if d < 0:
+                d = -d
+            wgt = k[d]
+            den += wgt
+            num += wgt * array[j]
+
+        numer[i] = num
+        denom[i] = den
+        pi = num / (den if den > eps else eps)
+        pred[i] = pi
+        di = array[i] - pi
+        ssr_array[i] = di * di
+
     sra = 0.0
     for i in range(n):
         sra += ssr_array[i]
@@ -125,6 +200,188 @@ def _ssr_region_gaussian(array: np.ndarray, idxs: np.ndarray, W: np.ndarray,
     return sri + sro_near + sro_far
 
 @njit(cache=True, fastmath=True)
+def _laplace_accum_1d(w: np.ndarray, sigma: float) -> np.ndarray:
+    """
+    Stable O(n) accumulator for Laplace smoothing:
+      f[i] = sum_j exp(-|i-j|/sigma) * w[j]
+
+    - FIX: rightward recurrence off-by-one corrected
+    - Optional edge seeding (pad_k>=1) to reduce boundary sag
+    """
+    n = w.shape[0]
+    gamma = math.exp(-1.0 / sigma)
+
+    Lx = np.zeros(n)
+    L1 = np.zeros(n)
+    for i in range(1, n):
+        Lx[i] = gamma * (Lx[i-1] + w[i-1])
+        L1[i] = gamma * (L1[i-1] + 1.0)
+
+    Rx = np.zeros(n)
+    R1 = np.zeros(n)
+    for i in range(n-2, -1, -1):
+        Rx[i] = gamma * (Rx[i+1] + w[i+1])
+        R1[i] = gamma * (R1[i+1] + 1.0)
+
+    out = (Lx + w + Rx) / np.maximum(L1 + 1.0 + R1, 1e-12)
+    return out
+
+@njit(cache=True, fastmath=True)
+def calculate_laplace_sra_fast(array: np.ndarray, sigma: float):
+    n = array.shape[0]
+
+    x = array.astype(np.float64)
+
+    num = _laplace_accum_1d(x, sigma)
+    den = _laplace_accum_1d(np.ones_like(x), sigma)
+
+    pred = np.empty(n, dtype=np.float64)
+    ssr_arr = np.empty(n, dtype=np.float64)
+    ssr = 0.0
+
+    for i in range(n):
+        d = den[i]
+        p = num[i] / d if d > 1e-12 else 0.0
+        pred[i] = p
+        r = x[i] - p
+        ssr_arr[i] = r * r
+        ssr += ssr_arr[i]
+
+    ssr_ps = np.empty(n + 1, dtype=np.float64)
+    ssr_ps[0] = 0.0
+    for i in range(n):
+        ssr_ps[i + 1] = ssr_ps[i] + ssr_arr[i]
+
+    return ssr, ssr_arr, pred, ssr_ps
+
+@njit(cache=True, fastmath=True)
+def calculate_laplace_sra_trunc(array: np.ndarray, sigma: float, r: int):
+    n = array.shape[0]
+    x = array.astype(np.float64)
+    r = int(r)
+    if r < 0:
+        r = 0
+
+    k = np.empty(r + 1, dtype=np.float64)
+    inv = 1.0 / (sigma if sigma > 1e-12 else 1e-12)
+    for d in range(r + 1):
+        k[d] = np.exp(-d * inv)
+
+    pred = np.empty(n, dtype=np.float64)
+    ssr_arr = np.empty(n, dtype=np.float64)
+    ssr = 0.0
+    eps = 1e-12
+
+    for i in range(n):
+        j0 = i - r
+        if j0 < 0:
+            j0 = 0
+        j1 = i + r
+        if j1 > n - 1:
+            j1 = n - 1
+
+        num = 0.0
+        den = 0.0
+        for j in range(j0, j1 + 1):
+            d = i - j
+            if d < 0:
+                d = -d
+            wgt = k[d]
+            den += wgt
+            num += wgt * x[j]
+
+        p = num / (den if den > eps else eps)
+        pred[i] = p
+        r_i = x[i] - p
+        ssr_arr[i] = r_i * r_i
+        ssr += ssr_arr[i]
+
+    ssr_ps = np.empty(n + 1, dtype=np.float64)
+    ssr_ps[0] = 0.0
+    for i in range(n):
+        ssr_ps[i + 1] = ssr_ps[i] + ssr_arr[i]
+
+    return ssr, ssr_arr, pred, ssr_ps
+
+@njit(cache=True, fastmath=True)
+def _laplace_accum_trunc_1d(x: np.ndarray, sigma: float, r: int) -> np.ndarray:
+    """
+    Exact truncated Laplace accumulator:
+        acc[i] = sum_{|i-j| <= r} gamma^{|i-j|} x[j]
+    with gamma = exp(-1/sigma)
+
+    Complexity: O(n)
+    """
+    n = x.shape[0]
+    acc = np.empty(n, dtype=np.float64)
+
+    if n == 0:
+        return acc
+
+    if r < 0:
+        r = 0
+
+    gamma = np.exp(-1.0 / (sigma if sigma > 1e-12 else 1e-12))
+    gamma_r1 = gamma ** (r + 1)
+
+    # left[i] = sum_{k=1}^{min(r,i)} gamma^k x[i-k]
+    left = np.empty(n, dtype=np.float64)
+    left[0] = 0.0
+    for i in range(1, n):
+        val = gamma * (x[i - 1] + left[i - 1])
+        tail_idx = i - r - 1
+        if tail_idx >= 0:
+            val -= gamma_r1 * x[tail_idx]
+        left[i] = val
+
+    # right[i] = sum_{k=1}^{min(r,n-1-i)} gamma^k x[i+k]
+    right = np.empty(n, dtype=np.float64)
+    right[n - 1] = 0.0
+    for i in range(n - 2, -1, -1):
+        val = gamma * (x[i + 1] + right[i + 1])
+        tail_idx = i + r + 1
+        if tail_idx < n:
+            val -= gamma_r1 * x[tail_idx]
+        right[i] = val
+
+    for i in range(n):
+        acc[i] = left[i] + x[i] + right[i]
+
+    return acc
+
+@njit(cache=True, fastmath=True)
+def calculate_laplace_sra_fast_trunc(array: np.ndarray, sigma: float, r: int):
+    """
+    Exact truncated Laplace NWKR SRA using the truncated Laplace recurrence trick.
+    Complexity: O(n)
+    """
+    n = array.shape[0]
+    x = array.astype(np.float64)
+
+    num = _laplace_accum_trunc_1d(x, sigma, r)
+    den = _laplace_accum_trunc_1d(np.ones_like(x), sigma, r)
+
+    pred = np.empty(n, dtype=np.float64)
+    ssr_arr = np.empty(n, dtype=np.float64)
+    ssr = 0.0
+    eps = 1e-12
+
+    for i in range(n):
+        d = den[i]
+        p = num[i] / d if d > eps else 0.0
+        pred[i] = p
+        diff = x[i] - p
+        ssr_arr[i] = diff * diff
+        ssr += ssr_arr[i]
+
+    ssr_ps = np.empty(n + 1, dtype=np.float64)
+    ssr_ps[0] = 0.0
+    for i in range(n):
+        ssr_ps[i + 1] = ssr_ps[i] + ssr_arr[i]
+
+    return ssr, ssr_arr, pred, ssr_ps
+
+@njit(cache=True, fastmath=True)
 def laplace_sri(array: np.ndarray, idxs: np.ndarray, a: int, b: int, sigma: float) -> float:
     preds = predict_on_idxs_laplace(array, idxs, sigma)
     sri = 0.0
@@ -176,6 +433,44 @@ def laplace_sro_nearband(
         sro_near += diff * diff
 
     return sro_far + sro_near
+
+@njit(cache=True, fastmath=True)
+def laplace_sri_trunc(
+    array: np.ndarray,
+    idxs: np.ndarray,
+    a: int,
+    b: int,
+    k: np.ndarray,
+) -> float:
+    preds = predict_on_idxs_trunc(array, idxs, k)
+
+    sri = 0.0
+    for t in range(idxs.shape[0]):
+        i0 = int(idxs[t])
+        if a <= i0 <= b:
+            diff = array[i0] - preds[t]
+            sri += diff * diff
+
+    return sri
+
+@njit(cache=True, fastmath=True)
+def laplace_sro_trunc(
+    x: np.ndarray,
+    outside: np.ndarray,
+    k: np.ndarray,
+) -> float:
+    if outside.shape[0] == 0:
+        return 0.0
+
+    preds = predict_on_idxs_trunc(x, outside, k)
+
+    sro = 0.0
+    for t in range(outside.shape[0]):
+        i0 = int(outside[t])
+        diff = x[i0] - preds[t]
+        sro += diff * diff
+
+    return sro
 
 @njit(cache=True)
 def laplace_ssr_window(array, ssr_ps, idxs, a, b, range_cap, sigma):

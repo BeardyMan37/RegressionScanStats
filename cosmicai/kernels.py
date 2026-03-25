@@ -6,14 +6,37 @@ from .config import _KERNEL_ALPHA
 kernel_cache: Dict[Tuple[int, float, str], np.ndarray] = {}
 kerne_denom_cache: dict = {}
 
+def _kernel_matrix(n: int, w: float, kind: str) -> np.ndarray:
+    """
+    Full kernel matrix K[i,j] based on index distance |i-j|.
+    Gaussian: exp(-(d^2)/(w^2))
+    Laplace:  exp(-(d)/w)   (treat w as sigma/scale here)
+    """
+    idx = np.arange(n, dtype=np.float64)
+    D = np.abs(idx[:, None] - idx[None, :])
+    if kind == "gaussian":
+        return np.exp(-(D * D) / (w * w))
+    elif kind == "laplace":
+        sigma = max(float(w), 1e-12)
+        return np.exp(-D / sigma)
+    else:
+        raise ValueError(f"Unknown kernel kind: {kind!r}")
+    
+def truncated_kernel_vector(w: float, r: int, kind: str = "gaussian") -> np.ndarray:
+    d = np.arange(r + 1, dtype=np.float64)
+    if kind == "gaussian":
+        return np.exp(-(d * d) / (w * w))
+    elif kind == "laplace":
+        return np.exp(-d / w)
+    raise ValueError(f"Unknown kernel kind: {kind!r}")
+
 def precompute_kernel(L: int, w: float, kind: str = "gaussian", alpha: float = _KERNEL_ALPHA) -> np.ndarray:
     if w <= 0:
         raise ValueError("Kernel width w must be positive.")
     idx = np.arange(L, dtype=np.float64)
     D = np.abs(np.subtract.outer(idx, idx))
     if kind == "laplace":
-        b = max(float(w) / math.sqrt(2.0), 1e-12)
-        return np.exp(-D / b)
+        return np.exp(-D / w)
     elif kind == "gaussian":
         return np.exp(-(D * D) / (w * w))
     elif kind == "laplace_rt":

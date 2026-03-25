@@ -65,6 +65,23 @@ def load_data_by_length(data_path: str, interference_path: str):
 
         df["atmospheric_interference"] = interference
 
+        def true_ranges(arr):
+            ranges = []
+            idx = 0
+            for val, group in groupby(arr):
+                length = sum(1 for _ in group)
+                if val:
+                    ranges.append((idx, idx + length - 1))
+                idx += length
+            return ranges
+
+        if "flag_array" in df.columns:
+            df["flag_ranges"] = df["flag_array"].apply(
+                lambda x: true_ranges(x) if x is not None else []
+            )
+        else:
+            df["flag_ranges"] = [[] for _ in range(len(df))]
+
         actual_specs = [np.array(ast.literal_eval(s), dtype=float)
                         for s in df["amplitude_corr_tsys"]]
         freqs = [np.array(x, dtype=float) for x in df["frequency_array"].tolist()]
@@ -122,7 +139,13 @@ def load_data_by_length(data_path: str, interference_path: str):
                 idx += length
             return ranges
         
-        df["flag_ranges"] = df["flag_array"].apply(true_ranges)
+        if "flag_array" in df.columns:
+            df["flag_ranges"] = df["flag_array"].apply(
+                lambda x: true_ranges(x) if x is not None else []
+            )
+        else:
+            df["flag_ranges"] = [[] for _ in range(len(df))]
+
         actual_specs = [np.asarray(x, dtype=float) for x in df["amplitude"].tolist()]
         freqs = [np.asarray(x, dtype=float) for x in df["frequency_array"].tolist()]
 
@@ -140,8 +163,8 @@ def load_data_by_length(data_path: str, interference_path: str):
     flag_ranges = list(df["flag_ranges"])
     uid = df["uid"].to_numpy()
     ref = df["ref_antenna_name"].to_numpy()
-    ant = df["antenna_name"].to_numpy()
-    pol = df["pol_id"].to_numpy()
+    ant = df["antenna"].to_numpy()
+    pol = df["polarization"].to_numpy()
 
     length_groups: Dict[int, List[int]] = {}
     for i, s in enumerate(actual_specs):
