@@ -24,9 +24,9 @@ from pathlib import Path
 
 import pandas as pd
 
-KEYS   = ["eb_uid", "antenna", "spw_name_ms", "polarization"]
+KEYS   = ["eb_uid", "antenna_name", "spw_name_ms", "pol_id"]
 STATS  = ["atmospheric_interference", "score_masked", "score_unmasked", "score_fixed", "kernel_size", "win_masked_start", "win_masked_end",	"win_unmasked_start", "win_unmasked_end", "win_fixed_start", "win_fixed_end", "overlap_unmasked_pct", "overlap_fixed_pct", "fixed_bins_native", "rank_score"]
-CSV_GLOB = "length_*/*.csv"
+CSV_GLOB = "length_*/*.parquet"
 
 # ---------------------------------------------------------------------------
 # normalisers for the key columns
@@ -47,21 +47,20 @@ def norm_spw(s: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-def load_all_stats(csv_root: Path) -> pd.DataFrame:
+def load_all_stats(root: Path) -> pd.DataFrame:
     """Read every stats-CSV and return one concatenated DataFrame."""
-    paths = sorted(csv_root.rglob(CSV_GLOB))
+    paths = sorted(root.rglob(CSV_GLOB))
     if not paths:
-        raise FileNotFoundError(f"No CSV files matched {csv_root / CSV_GLOB}")
+        raise FileNotFoundError(f"No files matched {root / CSV_GLOB}")
 
     dfs = []
     for p in paths:
-        df = pd.read_csv(
-            p,
-            usecols=lambda c: c in KEYS + STATS,   # ignore the huge arrays
-            dtype={k: "string" for k in KEYS},     # keys as strings
-        )
+        cols = KEYS + STATS
+        df = pd.read_parquet(p)
+        df = df[cols].copy()
+
         # normalize poln and spw name:
-        df["polarization"] = df["polarization"].map(norm_pol)
+        df["pol_id"] = df["pol_id"].map(norm_pol)
         df["spw_name_ms"]  = df["spw_name_ms"].map(norm_spw)
         dfs.append(df)
 
@@ -88,7 +87,7 @@ def main(argv=None):
     #sci[KEYS] = sci[KEYS].astype("string")
     # ---- normalise key columns in science table ----------------------
     sci = sci.copy()
-    sci["polarization"] = sci["polarization"].map(norm_pol)
+    sci["pol_id"] = sci["pol_id"].map(norm_pol)
     sci["spw_name_ms"]  = sci["spw_name_ms"].map(norm_spw)
     sci[KEYS] = sci[KEYS].astype("string")
 
