@@ -1,4 +1,4 @@
-# CosmicAI
+# RegressionScanStats
 
 Automated spectral line detection in ALMA bandpass calibration data using Nadaraya-Watson Kernel Regression (NWKR) scan statistics.
 
