@@ -175,9 +175,3 @@ run_score_threshold_gridsearch(
     out_dir      = "data/score_experiment",
 )
 ```
-
----
-
-## Contributors
-
-- [Gazi Abdur Rakib](https://github.com/BeardyMan37)
