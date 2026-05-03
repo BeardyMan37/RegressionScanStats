@@ -181,4 +181,3 @@ run_score_threshold_gridsearch(
 ## Contributors
 
 - [Gazi Abdur Rakib](https://github.com/BeardyMan37)
-- [Prince Osei Aboagye](https://github.com/poaboagye)
