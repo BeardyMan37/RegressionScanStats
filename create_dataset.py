@@ -16,7 +16,7 @@ from itertools import groupby
 
 
 # ---------------------------------------------------------------------------
-# Helpers (reused from the original loader)
+# Helpers
 # ---------------------------------------------------------------------------
 
 def match_and_correct(freq_array, trans_freqs, trans_vals) -> np.ndarray:
@@ -48,119 +48,132 @@ def _parse_bool_list(s) -> Optional[np.ndarray]:
     return np.asarray(s, dtype=bool)
 
 
+def _to_ghz(freqs: np.ndarray) -> np.ndarray:
+    """
+    Normalise a frequency array to GHz.
+
+    The transmission table is always stored in GHz.  CSV loaders already
+    divide by 1e9 in _parse_freqs, but parquet loaders store raw Hz values.
+    This function detects Hz input by checking whether the median exceeds
+    1e6 and divides by 1e9 if so, ensuring all downstream atmospheric
+    interference lookups operate in the correct unit regardless of source.
+    """
+    if np.median(freqs) > 1e6:
+        return freqs / 1e9
+    return freqs
+
+
 def _compute_atmospheric_interference(
-    freqs: np.ndarray, trans: np.ndarray
+    freqs_ghz: np.ndarray, trans: np.ndarray
 ) -> List[Tuple[int, int]]:
-    """Detect atmospheric absorption troughs and return affected index ranges."""
+    """
+    Detect atmospheric absorption troughs and return affected index ranges.
+    freqs_ghz must already be in GHz — pass through _to_ghz() first.
+    """
     troughs, _ = find_peaks(-trans, prominence=1)
     if len(troughs) == 0:
         return []
 
     _, _, left_ips, right_ips = peak_widths(-trans, troughs, rel_height=0.75)
 
-    left_freqs = np.interp(left_ips, np.arange(len(freqs)), freqs)
-    right_freqs = np.interp(right_ips, np.arange(len(freqs)), freqs)
+    left_freqs  = np.interp(left_ips,  np.arange(len(freqs_ghz)), freqs_ghz)
+    right_freqs = np.interp(right_ips, np.arange(len(freqs_ghz)), freqs_ghz)
     widths_freq = right_freqs - left_freqs
 
-    trough_freqs = freqs[troughs]
+    trough_freqs  = freqs_ghz[troughs]
     trough_ranges = np.column_stack(
         (trough_freqs - widths_freq / 2.0, trough_freqs + widths_freq / 2.0)
     )
 
     closest_idxs: List[Tuple[int, int]] = []
     for start_f, end_f in trough_ranges:
-        s_idx = int(np.abs(freqs - start_f).argmin())
-        e_idx = int(np.abs(freqs - end_f).argmin())
+        s_idx = int(np.abs(freqs_ghz - start_f).argmin())
+        e_idx = int(np.abs(freqs_ghz - end_f).argmin())
         closest_idxs.append((s_idx, e_idx))
     return closest_idxs
 
 
 def _to_np(x):
-    """Convert to float array, dropping non-finite values."""
     a = np.asarray(x, dtype=float)
     return a[np.isfinite(a)]
 
 
-def classify_row(amplitude, min_len=16, abs_std_thresh=1e-2,
+def classify_row(amplitude, min_len=128, abs_std_thresh=1e-2,
                  edge_frac=0.03, k_min=4, z_edge=10.0, rel_edge=0.10,
-                 low_var_cv_thresh=1e-4):
+                 low_var_cv_thresh=1e-4,
+                 rolloff_frac=0.05,
+                 rolloff_drop_thresh=0.05,
+                 rolloff_trend_frac=0.15,
+                 rolloff_trend_thresh=0.03):
     """
     Classify a single amplitude array as one of:
       - "low_var"       : near-constant signal (likely bad / fill-value data)
       - "edge_plateau"  : both edges deviate from the centre in the same
                           direction by a large amount (likely bandpass artefact)
       - "regular"       : normal data worth keeping
- 
-    Parameters (tuned to minimise false positives)
-    ----------
-    min_len : int
-        Arrays shorter than this are always "regular" (too short to judge).
-    abs_std_thresh : float
-        If max |y - mean| is below this, the row is "low_var".  Raised to
-        1e-2 so that only truly flat / fill-value spectra are caught.
-    low_var_cv_thresh : float
-        Secondary low-var check: coefficient of variation (std/|mean|) must
-        also be below this threshold.  Prevents flagging spectra that happen
-        to have a small absolute range but meaningful relative variation.
-    edge_frac : float
-        Fraction of the band used to compute each edge mean (default 3%).
-    k_min : int
-        Minimum number of channels per edge (default 4).
-    z_edge : float
-        Number of centre-region standard deviations an edge must deviate by
-        to be considered anomalous.  Raised to 10 to be very conservative.
-    rel_edge : float
-        Minimum fractional deviation (|edge - centre| / |centre|) for an
-        edge to count as anomalous.  Raised to 10% so normal bandpass
-        roll-off is not flagged.
     """
     y = _to_np(amplitude)
     n = y.size
     if n < min_len:
-        return "regular"
- 
-    # ---- Low-variance check ----
+        return "too_short"
+
     mu = y.mean()
     max_dev = np.max(np.abs(y - mu))
     if max_dev < abs_std_thresh:
-        # Double-check with coefficient of variation to avoid false positives
         cv = np.std(y) / max(abs(mu), 1e-15)
         if cv < low_var_cv_thresh:
             return "low_var"
- 
-    # ---- Edge-plateau check ----
+
     k = max(int(edge_frac * n), k_min)
     k = min(k, n // 4)
     if k < 2:
         return "regular"
- 
+
     left_mean  = float(np.mean(y[:k]))
     right_mean = float(np.mean(y[-k:]))
     center     = y[k:-k] if n >= 2 * k + 1 else y
     c_med      = float(np.median(center))
     c_std      = float(np.std(center))
- 
-    # Threshold: must exceed BOTH the z-score AND the relative threshold
+
     abs_thr = z_edge * c_std
     rel_thr = rel_edge * max(abs(c_med), 1e-9)
     thr = max(abs_thr, rel_thr)
- 
+
     left_dev  = left_mean  - c_med
     right_dev = right_mean - c_med
- 
+
     if (abs(left_dev) > thr
             and abs(right_dev) > thr
             and np.sign(left_dev) == np.sign(right_dev)):
         return "edge_plateau"
- 
+    
+    rolloff_k = max(int(rolloff_frac * n), k_min * 2)
+    rolloff_k = min(rolloff_k, n // 4)
+    trend_k   = max(int(rolloff_trend_frac * n), rolloff_k * 2)
+    trend_k   = min(trend_k, n // 3)
+
+    if rolloff_k >= 4 and trend_k >= rolloff_k:
+        center    = y[trend_k:-trend_k] if n > 2 * trend_k else y
+        c_med     = float(np.median(center))
+        c_level   = max(abs(c_med), 1e-9)
+
+        # Right edge
+        right_narrow = (c_med - float(np.mean(y[-rolloff_k:]))) / c_level
+        right_wide   = (c_med - float(np.mean(y[-trend_k:])))   / c_level
+        if right_narrow > rolloff_drop_thresh and right_wide > rolloff_trend_thresh:
+            return "edge_rolloff"
+
+        # Left edge
+        left_narrow  = (c_med - float(np.mean(y[:rolloff_k]))) / c_level
+        left_wide    = (c_med - float(np.mean(y[:trend_k])))   / c_level
+        if left_narrow > rolloff_drop_thresh and left_wide > rolloff_trend_thresh:
+            return "edge_rolloff"
+
+
     return "regular"
 
 
 def _majority_with_tiebreak(s: pd.Series) -> str:
-    """
-    Return the most frequent label in *s*.  On ties, prefer the more
-    aggressive discard label (edge_plateau > low_var > regular).
-    """
     priority = {"edge_plateau": 2, "low_var": 1, "regular": 0}
     vc = s.value_counts()
     best, bestc = None, -1
@@ -185,15 +198,16 @@ def clean_spectral_data(
 
     Stages
     ------
-    1. **Low-var / edge-plateau removal** — rows are classified per-row,
-       then a group-majority vote (by eb_uid/antenna/spw/pol) decides
-       whether the group is bad.  Groups voted as ``low_var`` or
-       ``edge_plateau`` are discarded entirely.
-    2. **Atmospheric interference** — any row whose frequency band
-       overlaps a detected atmospheric absorption trough is dropped.
-    3. **Flag trimming** — indices marked ``True`` in ``flag_array``
-       (typically at band edges) are removed from the arrays of
-       surviving rows.  Rows left with no valid channels are dropped.
+    1. Low-var / edge-plateau removal — rows are classified per-row, then a
+       group-majority vote (by eb_uid/antenna/spw/pol) decides whether the
+       group is bad. Groups voted as low_var or edge_plateau are discarded.
+    2. Atmospheric interference — any row whose frequency band overlaps a
+       detected atmospheric absorption trough is dropped entirely.
+       Frequencies are normalised to GHz via _to_ghz() before the lookup so
+       that parquet files storing raw Hz values are correctly matched against
+       the transmission table (which is always in GHz).
+    3. Flag trimming — indices marked True in flag_array are removed from
+       surviving rows. Rows with no valid channels remaining are dropped.
 
     Parameters
     ----------
@@ -214,20 +228,21 @@ def clean_spectral_data(
     if data_path.endswith(".csv"):
         df = pd.read_csv(data_path, sep="|", dtype=str, header=0)
         df["frequency_array"] = df["frequency_array"].apply(_parse_freqs)
-        df["amplitude"] = df["amplitude"].apply(_parse_float_list)
-        df["phase"] = df["phase"].apply(_parse_float_list)
-        df["flag_array"] = df["flag_array"].apply(_parse_bool_list)
-        # If CSV has amplitude_corr_tsys instead of amplitude, use that
+        df["amplitude"]       = df["amplitude"].apply(_parse_float_list)
+        df["phase"]           = df["phase"].apply(_parse_float_list)
+        df["flag_array"]      = df["flag_array"].apply(_parse_bool_list)
         if "amplitude_corr_tsys" in df.columns and "amplitude" not in df.columns:
             df["amplitude"] = df["amplitude_corr_tsys"].apply(_parse_float_list)
 
     elif data_path.endswith(".parquet"):
         df = pd.read_parquet(data_path)
+        # Raw Hz values are stored as-is here; _to_ghz() is called at every
+        # use site that needs GHz (Stage 2 and flag trimming).
         df["frequency_array"] = df["frequency_array"].apply(
             lambda xs: np.array(xs, dtype=float)
         )
         df["amplitude"] = df["amplitude"].apply(lambda x: np.asarray(x, dtype=float))
-        df["phase"] = df["phase"].apply(lambda x: np.asarray(x, dtype=float))
+        df["phase"]     = df["phase"].apply(lambda x: np.asarray(x, dtype=float))
         if "flag_array" in df.columns:
             df["flag_array"] = df["flag_array"].apply(
                 lambda x: np.asarray(x, dtype=bool) if x is not None else None
@@ -238,14 +253,12 @@ def clean_spectral_data(
         raise ValueError(f"Unsupported file extension: {data_path!r}")
 
     # ---- Load atmospheric transmission reference ----
-    trans_df = pd.read_parquet(interference_path)
-    trans_freqs = trans_df["Frequency (GHz)"].to_numpy()
-    trans_vals = trans_df["Transmission (%)"].to_numpy()
+    trans_df    = pd.read_parquet(interference_path)
+    trans_freqs = trans_df["Frequency (GHz)"].to_numpy()   # always GHz
+    trans_vals  = trans_df["Transmission (%)"].to_numpy()
 
     # ---- Stage 1: Discard low-variation and edge-plateau rows ----
     total_in = len(df)
-    # Classify each row individually, then take group-majority vote
-    # so that isolated misclassifications don't cause false drops.
     grp_cols = [c for c in ["eb_uid", "uid", "antenna_name", "spw_name_ms", "pol_id"]
                 if c in df.columns]
 
@@ -260,60 +273,62 @@ def clean_spectral_data(
         )
         df = df.merge(grp_majority, on=grp_cols, how="left")
     else:
-        # No grouping columns available — fall back to per-row classification
         df["_grp_type"] = df["_row_type"]
 
     n_lowvar = int((df["_grp_type"] == "low_var").sum())
     n_edge   = int((df["_grp_type"] == "edge_plateau").sum())
     print(f"Stage 1 — dropped {n_lowvar} low-var rows, {n_edge} edge-plateau rows")
 
-    df = df[df["_grp_type"] == "regular"].drop(
+    discard_types = {"low_var", "edge_plateau", "edge_rolloff", "too_short"}
+    n_lowvar   = int((df["_grp_type"] == "low_var").sum())
+    n_edge     = int((df["_grp_type"] == "edge_plateau").sum())
+    n_rolloff  = int((df["_grp_type"] == "edge_rolloff").sum())
+    n_short    = int((df["_grp_type"] == "too_short").sum())
+    print(f"Stage 1 — dropped {n_lowvar} low-var, {n_edge} edge-plateau, "
+        f"{n_rolloff} edge-rolloff, {n_short} too-short rows")
+
+    df = df[~df["_grp_type"].isin(discard_types)].drop(
         columns=["_row_type", "_grp_type"]
     ).reset_index(drop=True)
-
-    total_after_stage1 = len(df)
 
     # ---- Stage 2: Drop rows with ANY atmospheric interference ----
     keep_row = []
     has_interference_count = 0
 
     for i in df.index:
-        freqs = np.asarray(df.at[i, "frequency_array"], dtype=float)
         amps = np.asarray(df.at[i, "amplitude"], dtype=float)
 
-        # Drop all-zero spectra
         if np.all(amps == 0.0):
             keep_row.append(False)
             continue
 
-        # Check for atmospheric interference — drop entire row if any found
-        trans = match_and_correct(freqs, trans_freqs, trans_vals)
-        atm_ranges = _compute_atmospheric_interference(freqs, trans)
+        freqs_ghz  = _to_ghz(np.asarray(df.at[i, "frequency_array"], dtype=float))
+        trans      = match_and_correct(freqs_ghz, trans_freqs, trans_vals)
+        atm_ranges = _compute_atmospheric_interference(freqs_ghz, trans)
+
         if len(atm_ranges) > 0:
             keep_row.append(False)
             has_interference_count += 1
-            continue
-
-        keep_row.append(True)
+        else:
+            keep_row.append(True)
 
     df["_keep"] = keep_row
     df = df[df["_keep"]].drop(columns=["_keep"]).reset_index(drop=True)
     print(f"Stage 2 — dropped {has_interference_count} rows due to atmospheric interference")
 
     # ---- Stage 3: Trim flagged indices from surviving rows ----
-    clean_freqs = []
-    clean_amps = []
+    clean_freqs  = []
+    clean_amps   = []
     clean_phases = []
-    final_keep = []
+    final_keep   = []
 
     for i in df.index:
-        freqs = np.asarray(df.at[i, "frequency_array"], dtype=float)
-        amps = np.asarray(df.at[i, "amplitude"], dtype=float)
-        phases = np.asarray(df.at[i, "phase"], dtype=float)
-        n = len(freqs)
+        freqs  = np.asarray(df.at[i, "frequency_array"], dtype=float)
+        amps   = np.asarray(df.at[i, "amplitude"],       dtype=float)
+        phases = np.asarray(df.at[i, "phase"],           dtype=float)
+        n      = len(freqs)
 
-        # Build discard mask from flag_array (True → discard)
-        discard = np.zeros(n, dtype=bool)
+        discard  = np.zeros(n, dtype=bool)
         flag_arr = df.at[i, "flag_array"]
         if flag_arr is not None:
             flag_arr = np.asarray(flag_arr, dtype=bool)
@@ -333,13 +348,12 @@ def clean_spectral_data(
             clean_phases.append(phases[valid])
 
     df["frequency_array"] = clean_freqs
-    df["amplitude"] = clean_amps
-    df["phase"] = clean_phases
-    df["_keep"] = final_keep
+    df["amplitude"]       = clean_amps
+    df["phase"]           = clean_phases
+    df["_keep"]           = final_keep
 
     df = df[df["_keep"]].drop(columns=["_keep", "flag_array"]).reset_index(drop=True)
 
-    # Select output columns
     output_cols = [
         c for c in [
             "eb_uid", "uid", "time", "receiver_band", "ref_antenna_name",
@@ -350,7 +364,6 @@ def clean_spectral_data(
     ]
     df = df[output_cols]
 
-    # ---- Optionally save ----
     if output_path:
         if output_path.endswith(".parquet"):
             df.to_parquet(output_path, index=False)
@@ -376,12 +389,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Clean ALMA spectral data")
-    parser.add_argument("--data-path", help="Path to raw data (.csv or .parquet)")
+    parser.add_argument("--data-path",         help="Path to raw data (.csv or .parquet)")
     parser.add_argument("--interference-path", help="Path to atmospheric transmission .parquet")
-    parser.add_argument(
-        "-o", "--output", default=None,
-        help="Output path for cleaned data (.parquet or .csv)"
-    )
+    parser.add_argument("-o", "--output",      default=None,
+                        help="Output path for cleaned data (.parquet or .csv)")
     args = parser.parse_args()
 
     cleaned = clean_spectral_data(args.data_path, args.interference_path, args.output)

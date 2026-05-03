@@ -102,11 +102,12 @@ def refine_all_windows_exact_for_length(
         # Build masked / unmasked valid sets
         # ------------------------------------------------------------
         mask = np.ones(n_trimmed, dtype=np.bool_)
-        for (s, e) in atm_interfs[i]:
-            s0 = max(s - buffer, 0)
-            e0 = min(e - buffer, n_trimmed - 1)
-            if s0 <= e0:
-                mask[s0:e0+1] = False
+        if len(atm_interfs) != 0:
+            for (s, e) in atm_interfs[i]:
+                s0 = max(s - buffer, 0)
+                e0 = min(e - buffer, n_trimmed - 1)
+                if s0 <= e0:
+                    mask[s0:e0+1] = False
 
         valid_all = np.arange(n_trimmed, dtype=np.int64)
         valid_masked = valid_all[mask]

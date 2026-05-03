@@ -147,6 +147,96 @@ def _add_astronomy_noise(
         xi[i] = rho * xi[i-1] + s * rng.normal(0.0, 1.0)
 
     y += np.sqrt(a) * (sigma_w * eps) + np.sqrt(1.0 - a) * (sigma_c * xi)
+    # y += sigma_w * eps
+
+
+def _ar2_process(
+    n: int,
+    rng: np.random.Generator,
+    phi1_range: Tuple[float, float] = (0.55, 1.15),
+    phi2_range: Tuple[float, float] = (-0.45, 0.15),
+    burnin: int = 200,
+) -> np.ndarray:
+    """
+    Generate a stationary-ish AR(2) process and standardize it.
+    """
+    phi1 = rng.uniform(*phi1_range)
+    phi2 = rng.uniform(*phi2_range)
+
+    # Ensure the process does not explode in obvious cases.
+    # If the sampled coefficients are too aggressive, clip them mildly.
+    phi1 = float(np.clip(phi1, -1.8, 1.8))
+    phi2 = float(np.clip(phi2, -0.95, 0.95))
+
+    m = n + burnin
+    x = np.zeros(m, dtype=np.float64)
+    eps = rng.normal(0.0, 0.1, size=m)
+
+    # Initialize with white noise
+    x[0] = eps[0]
+    if m > 1:
+        x[1] = phi1 * x[0] + eps[1]
+
+    for t in range(2, m):
+        x[t] = phi1 * x[t - 1] + phi2 * x[t - 2] + eps[t]
+
+    x = x[burnin:]
+    x -= x.mean()
+    x /= (x.std() + 1e-12)
+    if rng.random() < 0.5:
+        x *= -1.0
+    return x
+
+
+def _continuum_spectrum_like_ar2(n: int, W: int, rng: np.random.Generator) -> np.ndarray:
+    """
+    Continuum built from:
+      - a smooth quadratic trend
+      - an AR(2) structured component
+    """
+    x = np.linspace(0.0, 1.0, n)
+
+    level = rng.uniform(0.97, 1.01)
+
+    # draw magnitude, then randomize direction
+    slope_mag = rng.uniform(0.01, 0.05)
+    direction = 1.0 if rng.random() < 0.5 else -1.0
+    slope = direction * slope_mag
+
+    quad = rng.uniform(-0.03, 0.03)
+
+    trend = 1.0 + slope * (x - 0.5) + quad * (x - 0.5) ** 2
+
+    ar2 = _ar2_process(n, rng)
+
+    # Scale of the AR(2) continuum component
+    ar2_amp = rng.uniform(0.002, 0.010)
+
+    y = level * trend * (1.0 + ar2_amp * ar2)
+    return y.astype(np.float64)
+
+
+def _add_astronomy_noise_n1(
+    y: np.ndarray,
+    rng: np.random.Generator,
+    white_sigma_frac: Tuple[float, float] = (0.05, 0.1),
+    edge_beta_range: Tuple[float, float] = (0.2, 0.8),
+) -> None:
+    """
+    Add pure white N(0,1) noise, scaled by a small random amplitude.
+    """
+    n = y.size
+    level = float(np.median(y))
+    level = max(level, 1e-6)
+
+    sigma_w0 = level * rng.uniform(*white_sigma_frac)
+    edge_beta = rng.uniform(*edge_beta_range)
+
+    g = _edge_profile(n)
+    sigma_w = sigma_w0 * (1.0 + edge_beta * g)
+
+    eps = rng.normal(0.0, 1.0, size=n)   # pure N(0,1) noise
+    y += sigma_w * eps
 
 
 # ------------------------------
@@ -306,8 +396,8 @@ def _add_rect_step(
     y: np.ndarray,
     W: int,
     rng: np.random.Generator,
-    strength: float = 5.0,          # now interpreted as "k sigma"
-    width_frac: float = 0.2,
+    strength: float,          # now interpreted as "k sigma"
+    width_frac: float,
     center_range: Tuple[float, float] = (0.10, 0.90),
 ) -> Tuple[int, int]:
     """
@@ -394,6 +484,8 @@ def generate_single_spectrum(
     """
     y = _continuum_spectrum_like(length, W, rng)
     _add_astronomy_noise(y, rng)
+    # y = _continuum_spectrum_like_ar2(length, W, rng)
+    # _add_astronomy_noise_n1(y, rng)
 
     strong_intervals: List[Tuple[int, int]] = []
     # weak_intervals: List[Tuple[int, int]] = []
@@ -600,7 +692,7 @@ def plot_synthetic_groups_from_dataset(
                 #     _shade(ax, ignore_ranges[r], color="0.7", alpha=0.25, label="ignore" if row_i == 0 else None)
                 # _shade(ax, weak_labels[r], color="C2", alpha=0.20, label="weak" if row_i == 0 else None)
 
-                ax.set_title(f"L={L}, W={W}, row={r} (no strong anomaly)")
+                ax.set_title(f"n={L}, row={r} (no strong anomaly)")
                 ax.set_ylabel("Amplitude")
             else:
                 axes[row_i, 0].axis("off")
@@ -618,7 +710,7 @@ def plot_synthetic_groups_from_dataset(
                 # _shade(ax, weak_labels[r], color="C2", alpha=0.20, label="weak" if row_i == 0 else None)
                 _shade(ax, strong_labels[r], color="C1", alpha=0.35, label="strong" if row_i == 0 else None)
 
-                ax.set_title(f"L={L}, W={W}, row={r} (strong anomaly)")
+                ax.set_title(f"n={L}, width={W}, row={r} (strong anomaly)")
                 ax.set_ylabel("Amplitude")
             else:
                 axes[row_i, 1].axis("off")
@@ -630,7 +722,7 @@ def plot_synthetic_groups_from_dataset(
         if handles:
             axes[0, 1].legend(loc="best", fontsize=8)
 
-        fig.suptitle(f"Synthetic spectra for length L={L}, W={W}", y=0.99)
+        fig.suptitle(f"Synthetic spectra for length n={L}, width={W}", y=0.99)
         fig.tight_layout(rect=[0, 0, 1, 0.97])
 
         out_path = os.path.join(out_root, f"synthetic_L{L}_W{W}.png")
@@ -659,7 +751,7 @@ if __name__ == "__main__":
     data_step = generate_synthetic_dataset(seed=123, strong_rate=0.05, strong_kind="rect_step", exact_strong=True)
     # plot_synthetic_groups_from_dataset(data_abs, out_root="Images/SyntheticPlots/abs", n_no_anom=5, n_with_anom=5)
     # plot_synthetic_groups_from_dataset(data_em, out_root="Images/SyntheticPlots/em", n_no_anom=5, n_with_anom=5)
-    plot_synthetic_groups_from_dataset(data_step, out_root="Images/SyntheticPlots/step", n_no_anom=5, n_with_anom=5)
+    plot_synthetic_groups_from_dataset(data_step, out_root="images/SyntheticPlots/step", n_no_anom=5, n_with_anom=5)
 
     # out: Dict[str, np.ndarray] = {}
     # for g in data["groups"]:

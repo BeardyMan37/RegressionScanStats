@@ -23,9 +23,13 @@ def _kernel_matrix(n: int, w: float, kind: str) -> np.ndarray:
         raise ValueError(f"Unknown kernel kind: {kind!r}")
     
 def truncated_kernel_vector(w: float, r: int, kind: str = "gaussian") -> np.ndarray:
+    # w = max(float(w), 3)
     d = np.arange(r + 1, dtype=np.float64)
     if kind == "gaussian":
-        return np.exp(-(d * d) / (w * w))
+        try:
+            return np.exp(-(d * d) / (w * w))
+        except Exception as e:
+            print("Printing in exception", w)
     elif kind == "laplace":
         return np.exp(-d / w)
     raise ValueError(f"Unknown kernel kind: {kind!r}")
