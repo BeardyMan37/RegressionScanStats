@@ -7,7 +7,7 @@ from cosmicai.warmup import warmup_numba_and_caches
 from cosmicai.scan import scan_row_with_nwkr
 from cosmicai.parallel_exec import polynomial_scan_ranges_parallel
 from cosmicai.superres import sr_factor, superresolve_ranges, superresolve, refine_all_windows_exact_for_length
-from cosmicai.viz import plot_top_k
+from cosmicai.viz import plot_all_spectra, plot_top_k
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Scan spectrograms for best windows using NWKR.")
@@ -84,7 +84,7 @@ def main() -> None:
             windows_exact_fixed    = windows_sr_fixed
 
         meta = {"uid": uid, "ref": ref, "ant": ant, "pol": pol, "freq": freqs}
-        plot_top_k(
+        plot_all_spectra(
             df=df,
             actual_spec_arrays=actual_specs,
             freqs=freqs,
@@ -96,21 +96,21 @@ def main() -> None:
             scores_fixed=scores_fixed,
             overlap_unmasked_pct=overlap_unm_pct,
             overlap_fixed_pct=overlap_fix_pct,
-            atm_interfs=atm_interfs,
+            # atm_interfs=atm_interfs,
             meta=meta,
             ws=ws,
-            k=min(args.top_k, actual_specs.shape[0]),
-            per_fig=args.per_fig,
+            # k=min(args.top_k, actual_specs.shape[0]),
+            # per_fig=args.per_fig,
             buffer=BUFFER,
             out_dir=out_dir,
             data_dir=data_dir,
             sra_preds=sra_preds,
-            sri_idxs_masked=sri_idxs_m,
-            sri_vals_masked=sri_vals_m,
+            # sri_idxs_masked=sri_idxs_m,
+            # sri_vals_masked=sri_vals_m,
             sri_idxs_unmasked=sri_idxs_unm,
             sri_vals_unmasked=sri_vals_unm,
-            sri_idxs_fixed=sri_idxs_fix,
-            sri_vals_fixed=sri_vals_fix,
+            # sri_idxs_fixed=sri_idxs_fix,
+            # sri_vals_fixed=sri_vals_fix,
             sr_factor=SR_FACTOR,
             fixed_bins_nat=fixed_bins_nat,
             rank_by="masked",

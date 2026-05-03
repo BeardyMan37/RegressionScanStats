@@ -162,9 +162,9 @@ def load_data_by_length(data_path: str, interference_path: str):
     atm_intrf = list(df["atmospheric_interference"])
     flag_ranges = list(df["flag_ranges"])
     uid = df["uid"].to_numpy()
-    ref = df["ref_antenna_name"].to_numpy()
-    ant = df["antenna"].to_numpy()
-    pol = df["polarization"].to_numpy()
+    ref = df["ref_antenna_name" if "ref_antenna_name" in df.columns else "ref_antenna"].to_numpy()
+    ant = df["antenna" if "antenna" in df.columns else "antenna_name"].to_numpy()
+    pol = df["polarization" if "polarization" in df.columns else "pol_id"].to_numpy()
 
     length_groups: Dict[int, List[int]] = {}
     for i, s in enumerate(actual_specs):

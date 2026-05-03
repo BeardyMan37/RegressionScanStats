@@ -1,6 +1,59 @@
 """
+Single-file modular implementation of the CosmicAI NWKR scan statistics pipeline.
+
+Sections
+--------
+  1.  Imports & constants
+  2.  Public types          (Input, Output)
+  3.  Atmospheric detection (load_transmission, detect_atm_ranges)
+  4.  SR / superresolution  (_sr_factor, _superresolve, ...)
+  5.  Kernel primitives     (_truncated_kernel_vector, _calculate_gaussian_sra_trunc)
+  6.  Numba JIT state       (_is_inside, _nin_din_*, _sse_out_*, _buf_*)
+  7.  Core scan             (_scan_single_row)
+  8.  Public API            (compute_scan_statistics_scores)
+  9.  CLI runner            (main)
+
+Library usage
+-------------
+    from scan_statistics_runner import compute_scan_statistics_scores, Input, Output
+
+    results = compute_scan_statistics_scores({
+        "key": Input(amplitude=amp, frequency=freq, flag_array=flags,
+                     atm_ranges=[(s1,e1), (s2,e2)])
+    })
+    out = results["key"]["masked"]
+    print(out.score, out.win_start, out.win_end)
+
+CLI usage
+---------
+    python scan_statistics_runner.py \
+        --amplitude  amp.npy \
+        --frequency  freq.npy \
+        --interference full_spectrum.gzip \
+        --key my_baseline
+
+    # with optional flag array:
+    python scan_statistics_runner.py \
+        --amplitude  amp.npy \
+        --frequency  freq.npy \
+        --flag-array flags.npy \
+        --interference full_spectrum.gzip \
+        --key my_baseline
+
+Arguments
+---------
+    --amplitude     (required) .npy file, 1-D float64 amplitude array.
+    --frequency     (required) .npy file, 1-D float64 frequency array in GHz.
+    --flag-array    (optional) .npy file, 1-D bool array (True = flagged).
+                    Defaults to all-False if omitted.
+    --interference  (optional) Transmission parquet/gzip file with columns
+                    "Frequency (GHz)" and "Transmission (%)".
+                    Used to detect atmospheric absorption line ranges.
+                    If omitted, atm_ranges is empty.
+    --key           Label for this spectrum (default: "spectrum").
+    --kernel        "gaussian" (default) or "laplace".
+    --log-level     Logging verbosity (default: INFO).
 scan_statistics.py
-==================
 Public entry point for computing NWKR-based scan statistics on batched
 bandpass calibration inputs.
 
