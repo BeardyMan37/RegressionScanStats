@@ -514,3 +514,87 @@ def compute_scan_statistics_scores(
             results[key] = _BAD_RESULT
 
     return results
+
+
+# =============================================================================
+# 9. CLI runner
+# =============================================================================
+
+def _flag_ranges_to_array(flag_ranges, n: int) -> np.ndarray:
+    """Convert flag_ranges list-of-tuples to boolean array."""
+    arr = np.zeros(n, dtype=bool)
+    if flag_ranges is None:
+        return arr
+    try:
+        for rng in flag_ranges:
+            if rng is None: continue
+            s, e = int(rng[0]), int(rng[1])
+            s = max(0, s); e = min(n - 1, e)
+            if s <= e: arr[s:e + 1] = True
+    except (TypeError, ValueError, IndexError):
+        pass
+    return arr
+
+
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Run NWKR scan statistics on a single spectrum.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    p.add_argument("--amplitude",     required=True,
+                   help="Path to .npy file containing 1-D amplitude array.")
+    p.add_argument("--frequency",     required=True,
+                   help="Path to .npy file containing 1-D frequency array (GHz).")
+    p.add_argument("--flag-array",    default=None,
+                   help="Path to .npy file containing 1-D boolean flag array "
+                        "(True = flagged). Optional; defaults to all-False.")
+    p.add_argument("--interference",  default=None,
+                   help="Transmission table parquet/gzip for atm detection "
+                        "(columns: 'Frequency (GHz)', 'Transmission (%)'). Optional.")
+    p.add_argument("--key",           default="spectrum",
+                   help="Label for this spectrum in the output.")
+    p.add_argument("--kernel",        default="gaussian",
+                   choices=["gaussian", "laplace"])
+    p.add_argument("--log-level",     default="INFO",
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    return p.parse_args()
+
+
+def main() -> Dict[str, ScanResult]:
+    args = _parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(levelname)s: %(message)s",
+    )
+
+    # --- load arrays ---
+    amp  = np.load(args.amplitude).astype(np.float64)
+    freq = np.load(args.frequency).astype(np.float64)
+    n    = len(amp)
+
+    if args.flag_array:
+        flag_array = np.load(args.flag_array).astype(bool)
+    else:
+        flag_array = np.zeros(n, dtype=bool)
+
+    # --- atmospheric detection ---
+    atm_ranges: List[Tuple[int, int]] = []
+    if args.interference:
+        trans_freqs, trans_vals = load_transmission(args.interference)
+        atm_ranges = detect_atm_ranges(freq, trans_freqs, trans_vals)
+
+    # --- build input and run ---
+    keyed_input: Dict[str, Input] = {
+        args.key: Input(
+            amplitude  = amp,
+            frequency  = freq,
+            flag_array = flag_array,
+            atm_ranges = atm_ranges,
+        )
+    }
+
+    return compute_scan_statistics_scores(keyed_input, kernel_kind=args.kernel)
+
+
+if __name__ == "__main__":
+    main()
