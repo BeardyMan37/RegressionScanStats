@@ -129,7 +129,16 @@ def run_score_experiment(
     os.makedirs(out_dir, exist_ok=True)
 
     # ---- Load ----
-    df = pd.read_parquet(parquet_path)
+    if parquet_path.endswith(".csv"):
+        df = pd.read_csv(parquet_path)
+        for col in ["amplitude", "frequency_array"]:
+            df[col] = df[col].apply(
+                lambda s: np.fromstring(s.strip("[]"), sep=" ")
+                if isinstance(s, str) else np.asarray(s, dtype=np.float64)
+            )
+        df["label"] = df["label"].astype(bool)
+    else:
+        df = pd.read_parquet(parquet_path)
     print(f"Loaded {len(df)} rows  "
           f"(label=True: {df['label'].sum()}, "
           f"label=False: {(~df['label']).sum()})")
