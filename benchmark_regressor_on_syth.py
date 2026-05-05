@@ -66,17 +66,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import stumpy
 import ruptures as rpt
-from cosmicai.superres import refine_all_windows_exact_for_length, superresolve
+from helpers.superres import refine_all_windows_exact_for_length, superresolve
 from gen_ar2_data import generate_ar2_dataset
 from kats.consts import TimeSeriesData
 from kats.detectors.cusum_detection import CUSUMDetector
 
-from cosmicai.config import KernelKind, ref_freq, set_kernel_kind
-from cosmicai.kernels import get_kernel_and_denom
-from cosmicai.predictors import predict_on_idxs
-import cosmicai.regressors as rg
-from cosmicai.scan import scan_row_with_nwkr, scan_row_with_nwkr_naive
-from cosmicai.scoring import calculate_gaussian_sra_with_nd, calculate_laplace_sra_fast
+from helpers.config import KernelKind, ref_freq, set_kernel_kind
+from helpers.kernels import get_kernel_and_denom
+from helpers.predictors import predict_on_idxs
+import helpers.regressors as rg
+from helpers.scan import scan_row_with_nwkr, scan_row_with_nwkr_naive
+from helpers.scoring import calculate_gaussian_sra_with_nd, calculate_laplace_sra_fast
 from gen_synth_data import SpectrumSpec, generate_synthetic_dataset
 
 

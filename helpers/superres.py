@@ -3,7 +3,7 @@ import math
 import numpy as np
 from typing import Iterable, List, Tuple
 
-from cosmicai.predictors import predict_on_idxs_trunc
+from .predictors import predict_on_idxs_trunc
 from .scoring import calculate_gaussian_sra_trunc, calculate_laplace_sra_fast_trunc
 from .kernels import truncated_kernel_vector
 from .config import ref_freq, get_kernel_kind, get_super_resolve_base, KernelKind

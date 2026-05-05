@@ -1,13 +1,13 @@
 from __future__ import annotations
 import argparse, logging, time, os
 from typing import Dict
-from cosmicai.config import set_kernel_kind, get_kernel_kind
-from cosmicai.io_preprocess import load_data_by_length
-from cosmicai.warmup import warmup_numba_and_caches
-from cosmicai.scan import scan_row_with_nwkr
-from cosmicai.parallel_exec import polynomial_scan_ranges_parallel
-from cosmicai.superres import sr_factor, superresolve_ranges, superresolve, refine_all_windows_exact_for_length
-from cosmicai.viz import plot_all_spectra, plot_top_k
+from helpers.config import set_kernel_kind, get_kernel_kind
+from helpers.io_preprocess import load_data_by_length
+from helpers.warmup import warmup_numba_and_caches
+from helpers.scan import scan_row_with_nwkr
+from helpers.parallel_exec import polynomial_scan_ranges_parallel
+from helpers.superres import sr_factor, superresolve_ranges, superresolve, refine_all_windows_exact_for_length
+from helpers.viz import plot_all_spectra, plot_top_k
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Scan spectrograms for best windows using NWKR.")

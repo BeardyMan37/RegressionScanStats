@@ -7,10 +7,10 @@ Automated spectral line detection in ALMA bandpass calibration data using Nadara
 ## Installation
 
 ```bash
-git clone https://github.com/BeardyMan37/CosmicAI.git
-cd CosmicAI
+git clone https://github.com/BeardyMan37/RegressionScanStats.git
+cd RegressionScanStats
 conda env create -f environment.yml
-conda activate CosmicAI
+conda activate RegressionScanStats
 ```
 
 ---
@@ -18,8 +18,8 @@ conda activate CosmicAI
 ## Repository Structure
 
 ```
-CosmicAI/
-├── cosmicai/                        # Core library
+RegressionScanStats/
+├── helpers/                        # Core library
 │   ├── config.py                    # Global config (kernel kind, ref_freq)
 │   ├── scan.py                      # NWKR scan row (optimized + naive)
 │   ├── kernels.py                   # Gaussian and Laplace kernel vectors

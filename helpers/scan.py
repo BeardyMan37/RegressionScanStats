@@ -8,8 +8,6 @@ from .kernel_optimized_state import (
     buf_init, buf_add, buf_remove,
     nin_din_init_full, nin_din_add, nin_din_remove,
     sse_out_from_nin_din, sse_out_add, sse_out_remove,
-    state_init, state_add, state_remove,
-    kernel_state_init_trunc, kernel_state_add_point_trunc, kernel_state_remove_point_trunc,
 )
 from .scoring import (
     _nwkr_predict_subset,
