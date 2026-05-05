@@ -10,10 +10,10 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 
-from cosmicai.config import set_kernel_kind, ref_freq
-from cosmicai.io_preprocess import load_data_by_length
-from cosmicai.warmup import warmup_numba_and_caches
-from cosmicai.superres import sr_factor, superresolve_ranges, superresolve
+from helpers.config import set_kernel_kind, ref_freq
+from helpers.io_preprocess import load_data_by_length
+from helpers.warmup import warmup_numba_and_caches
+from helpers.superres import sr_factor, superresolve_ranges, superresolve
 
 from benchmark_regressor_on_syth import (
     _run_one, ALL_METHODS, _resolve_methods, iou as compute_iou

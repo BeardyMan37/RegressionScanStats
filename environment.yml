@@ -1,4 +1,4 @@
-name: CosmicAI
+name: RegressionScanStats
 channels:
   - defaults
   - https://repo.anaconda.com/pkgs/main
@@ -13,4 +13,3 @@ dependencies:
   - plotly
   - fastparquet
   - numba
-prefix: C:\Users\rakib\.conda\envs\CosmicAI
