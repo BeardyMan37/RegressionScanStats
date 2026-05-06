@@ -164,24 +164,24 @@ ALL_METHODS: Dict[str, dict] = {
         "m": None,
         "ignore_trivial": True,
     },
-    # "kats_cusum": {
-    #     "mode": "kats_cusum",
-    #     "alpha": 0.01,
-    # },
+    "kats_cusum": {
+        "mode": "kats_cusum",
+        "alpha": 0.01,
+    },
     "bocpd": {
         "mode": "bocpd",
         "hazard_lambda": 50.0,
     },
-    # "binseg": {
-    #     "mode": "binseg",
-    #     "min_size": 5,
-    #     "model": "l2",
-    # },
-    # "clasp": {
-    #     "mode": "clasp",
-    #     "min_seg_size": 5,
-    #     "n_cps": 2,
-    # },
+    "binseg": {
+        "mode": "binseg",
+        "min_size": 5,
+        "model": "l2",
+    },
+    "clasp": {
+        "mode": "clasp",
+        "min_seg_size": 5,
+        "n_cps": 2,
+    },
     "lrt": {
         "mode": "lrt",
         "min_seg_size": 5,
@@ -370,7 +370,7 @@ def _make_nwkr_params(
         freqs = np.arange(x.size, dtype=np.float64) * freq_step
     set_kernel_kind(kernel_kind)
     # params = (0, x, [], [], freqs, buffer, sr_factor, W, R, W, False, True, False)
-    params = (0, x, [], [], freqs, buffer, sr_factor, None, None, None, False, True, False)
+    params = (0, x, [], [], freqs, buffer, sr_factor, W, R, 2*W, False, True, False)
     return params
 
 
@@ -1259,13 +1259,15 @@ def _run_one(x: np.ndarray, freqs: np.ndarray, W: int, R: int, cfg: dict) -> Tup
     if mode == "nwkr":
         naive = cfg.get("family", "optimized") == "naive"
         n     = x.size
-        sr_factor = max(1, 2 ** math.ceil(math.log2(max(1, math.ceil((n + 1) / 450)))))
+        # sr_factor = max(1, 2 ** math.ceil(math.log2(max(1, math.ceil((n + 1) / 450)))))
         return scan_row_nwkr(
             x, freqs=freqs, W=W, R=R,
             kernel_kind=cfg.get("kernel_kind", "gaussian"),
             which=cfg.get("which", "unmasked_varlen"),
-            buffer=int(len(x)//20),
-            sr_factor=sr_factor,
+            # buffer=int(len(x)//20),
+            # sr_factor=sr_factor,
+            buffer=cfg.get("buffer", int(n//20)),
+            sr_factor=cfg.get("sr_factor", max(1, 2 ** math.ceil(math.log2(max(1, math.ceil((n + 1) / 450)))))),
             naive=naive,
         )
 
@@ -1965,8 +1967,11 @@ def run_real_data_benchmark(
 
         for name, cfg in families.items():
             t0 = time.perf_counter()
+            cfg_row = dict(cfg)
+            cfg_row["buffer"] = int(n//20)
+            cfg_row["sr_factor"] = max(1, 2 ** math.ceil(math.log2(max(1, math.ceil((n + 1) / 450)))))
             try:
-                score, (a, b) = _run_one(x, freqs, W, R, cfg)
+                score, (a, b) = _run_one(x, freqs, W, R, cfg_row)
             except Exception:
                 score, a, b = 0.0, 0, -1
             dt = time.perf_counter() - t0
