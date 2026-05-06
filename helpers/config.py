@@ -1,4 +1,3 @@
-# cosmicai/config.py
 from enum import Enum
 
 class KernelKind(str, Enum):
